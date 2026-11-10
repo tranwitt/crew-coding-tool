@@ -1,0 +1,51 @@
+# Variables: {repo}, {request}, {test_instruction}
+# Tasks execute in YAML order. Each task can reference a defined agent.
+tasks:
+  plan:
+    agent: planner
+    description: |-
+      Local project: {repo}
+      User request: {request}
+      Inspect relevant Python files and provide a concise implementation plan.
+      Identify affected files, possible regressions, and tests to run.
+      Do not modify any files.
+    expected_output: >-
+      A grounded implementation plan, file paths, risks, and proposed tests.
+
+  implement:
+    agent: developer
+    description: |-
+      Local project: {repo}
+      User request: {request}
+      Use the previous planning task as guidance, but inspect relevant files yourself.
+      Preview targeted patches before editing.
+      Apply only necessary changes using unique exact old_text fragments.
+      Do not overwrite whole files, use shell or Git tools, or modify the
+      project's protected folders.
+      {test_instruction}
+      Report edited files, backup paths, and verification results honestly.
+    expected_output: >-
+      Summary of edits, exact file paths, backup paths, and test status.
+
+  explain:
+    agent: explainer
+    use_previous_context: true
+    description: |-
+      Explain the implementation task results to the user for this request:
+      {request}
+      Use the implementation task output as evidence, not just the plan. Do not modify any files.
+      Explain in plain language what was done, why it was done, and what
+      changed in behavior. Name changed files only when confirmed.
+      State which tests were run and their outcomes; if no tests ran, say so.
+      Clearly identify failed, incomplete, or unverified work and next steps.
+      Do not invent edits, backup paths, or successful test results.
+      Output the following Markdown headings exactly:
+      ## Task overview
+      ## Work completed
+      ## Why these changes were made
+      ## Verification
+      ## Outstanding issues
+    expected_output: >-
+      A factual, readable Markdown explanation of the completed tasks, files
+      changed, rationale, verification, and outstanding issues, with the
+      specified headings.

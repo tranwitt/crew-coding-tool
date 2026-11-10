@@ -1,0 +1,4 @@
+crewai>=0.100
+pytest>=8
+python-dotenv>=1.0
+PyYAML>=6.0
