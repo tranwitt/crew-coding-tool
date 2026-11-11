@@ -1,6 +1,22 @@
+## Execution architecture (CrewAI primary)
+
+The default run calls `Crew(agents=..., tasks=..., process=Process.sequential).kickoff()` using the configured YAML agents and tasks. CrewAI owns the planning, development, and explanation workflow and agents have the repository tools. The deterministic JSON patch executor is **only a fallback** when CrewAI records zero edits. It does not run first.
+
+To run only CrewAI, use `--no-deterministic-fallback`. To retry the CrewAI developer before fallback, use `--edit-retries 1` (default 0 to avoid repeating an expensive failed pass).
+
+Example:
+
+```bash
+python main.py --repo /home/lonely_driver/working/esam-main --message "Add .doc ingestion" --no-deterministic-fallback
+```
+
+This is a rollback of the direct-editor architecture, not a claim that all models reliably invoke CrewAI tools.
+
+---
+
 # Standalone CrewAI Python Code Agent
 
-Edit an existing local Python project using CrewAI. No Git required. The agent saves a backup before each edit and supports safe local undo and Markdown and HTML logs for each run. Agents and tasks are defined in YAML. A read-only reasoning planner prepares a change plan, the coding agent edits files, and a read-only reasoning explainer summarizes the results.
+Edit an existing local Python project using CrewAI. No Git required. The agent saves a backup before each edit and supports safe local undo and plain-text .log files for each run. Agents and tasks are defined in YAML. A read-only reasoning planner prepares a change plan, the coding agent edits files, and a read-only reasoning explainer summarizes the results.
 
 ## Linux setup
 
@@ -67,18 +83,17 @@ python main.py --repo "$HOME/projects/sample-python-project" --agents-config /pa
 
 ## Explanation of completed tasks
 
-After the planner and developer finish, the `explainer` agent runs a separate `explain` task (both configured in YAML). It describes the request, confirmed code changes, rationale, test results, and any unfinished work. Its explanation appears in the terminal and in both Markdown and HTML logs under **EXPLANATION OF WORK COMPLETED**. The report is based on the developer's task output, so review the actual files for critical changes. The explainer has read-only tools and cannot modify code.
+After the planner and developer finish, the `explainer` agent runs a separate `explain` task (both configured in YAML). It describes the request, confirmed code changes, rationale, test results, and any unfinished work. Its explanation appears in the terminal and in both plain-text .log files under EXPLANATION OF WORK COMPLETED. The report is based on the developer's task output, so review the actual files for critical changes. The explainer has read-only tools and cannot modify code.
 
 You can customize its instructions in `config/tasks.yaml` or its role in `config/agents.yaml`.
 
 ## Logs and backups
 
-The standalone agent includes a dedicated `logs/` directory. Each run automatically writes **both** `logs/run-<timestamp>.md` and `logs/run-<timestamp>.html` with the request, configuration summary, console activity, and final result or error. Open the `.html` file in a browser for a readable report; HTML is generated even if the agent fails after logging starts. View the newest logs with:
+The standalone agent includes a dedicated `logs/` directory. Each run writes one plain-text `logs/run-<timestamp>.log` containing the request, configuration, console transcript, task results, explanation, token usage, and undo command. View the newest logs with:
 
 ```bash
 ls -lt logs/
-less "$(ls -t logs/run-*.md | head -n 1)"
-xdg-open "$(ls -t logs/run-*.html | head -n 1)"
+less "$(ls -t logs/run-*.log | head -n 1)"
 ```
 
 To use another directory, pass `--log-dir /path/to/logs`.
@@ -102,20 +117,16 @@ python main.py --repo "$HOME/projects/sample-python-project" --undo RUN_ID
 
 Undo restores all patched Python files from the selected run in reverse edit order. It **refuses** to overwrite a file changed after the agent edited it (checksum conflict), refuses to undo an older run while newer outstanding edits exist, and refuses altered backups. It does not reverse arbitrary side effects from pytest or external commands. Only edits made by this version are journaled; earlier backups cannot be automatically undone through `--undo`. If you used a custom `--backup-dir` for the run, pass the same directory when undoing.
 
-### Execution log formatting (no Markdown package required)
 
-Each run saves `logs/run-<timestamp>.md` and a matching self-contained `.html` file.
 The execution transcript is captured as preformatted text so CrewAI's verbose
 output, indentation, and code snippets are preserved. Separate sections contain
-per-task results, the explainer's report, and the final result. The HTML renderer
 uses only the Python standard library and escapes agent/tool output for safety.
-No `Markdown` PyPI dependency is needed.
 
 ### Undo command displayed after each run
 
 After a coding run, the terminal prints the exact command for undoing **that run**,
 including its run ID and repository path. The command is also included in the
-Markdown and HTML logs under **Undo this run**. When no edits were recorded,
+plain-text .log files under UNDO THIS RUN. When no edits were recorded,
 the output states that there is nothing to undo. A custom `--backup-dir` is
 included in the command when supplied.
 
@@ -128,4 +139,91 @@ CrewAI provider-reported token usage is displayed when available.
 
 ## Python-only scope
 
-The agent lists, reads, previews, and edits only existing `.py` files. Other languages, documentation and configuration files cannot be accessed through the agent file tools. Python patches are AST syntax-checked. `--allowed-paths` and `--read-only-paths` remain available. `--allow-tests` enables pytest on trusted repositories. Backups, undo, HTML/Markdown logs, and separate reasoning/coding models remain supported.
+
+## NVIDIA Nemotron / OpenAI-compatible models
+
+Configure each model separately in `.env` using `REASONING_LLM_*` and
+`CODING_LLM_*`. Set `*_LLM_BASE_URL` to the actual NVIDIA-compatible endpoint,
+`*_LLM_MODEL` to the model identifier accepted by CrewAI/LiteLLM for that
+endpoint, and `*_LLM_API_KEY` to your key. Model identifiers and context sizes
+vary by deployment; do not assume an example model's window applies to yours.
+
+Optional settings:
+
+- `REASONING_LLM_CONTEXT_WINDOW` and `CODING_LLM_CONTEXT_WINDOW`: positive
+  integer context capacities, passed to CrewAI's `context_window_size`.
+- `REASONING_LLM_EXTRA_BODY` and `CODING_LLM_EXTRA_BODY`: JSON objects forwarded
+  as provider-specific `extra_body`. Only use parameters supported by your
+  deployed model and endpoint. Do not use this to set token limits.
+
+Test basic connectivity without editing a repository:
+
+```bash
+python main.py --check-models
+```
+
+This makes one small live inference request per configured model (which may
+incur provider charges). It checks authentication, endpoint, model ID, and
+basic response compatibility, **not tool calling**. CrewAI's coding tools
+require reliable tool calling; confirm that capability with a small trusted
+coding task before relying on automated edits. API/provider failures are
+reported with the failing model role and exception.
+
+No custom total-token or output-token budget is enforced.
+
+## Nemotron / tool-call reliability
+
+The developer is instructed to invoke `patch_project_file` with an exact source
+fragment and replacement, not just describe a patch. The file tool emits
+`FILE_TOOL_EVENT` entries to the console and the timestamped `.log`, recording
+attempts, errors and successful writes without logging full source fragments.
+After the normal crew completes, the agent checks its backup/undo journal for
+actual writes. If there were none, it runs a **developer-only retry** once by
+default (`--edit-retries 0` to disable, up to 5). If no edits are recorded
+after retry, the command exits with status **2** rather than claiming success.
+This applies to coding requests; read-only/explanation requests with no edits
+will also exit 2, so set `--edit-retries 0` for those requests.
+
+The retry is another model call and may incur API charges. It cannot overcome
+unsupported tool schemas, access restrictions, or API failures. The journal
+verifies that writes occurred, not that the requested behavior is correct.
+Only `.py` files are editable; path restrictions, backups, undo, and plain
+`.log` output are preserved.
+
+## Focused CrewAI execution (default)
+
+The default execution path runs a read-only planning task through `Crew.kickoff()`,
+then runs **one focused CrewAI coding task per selected Python file** (up to six by
+default). The developer can call `patch_project_file` directly. If a CrewAI task
+instead returns a valid JSON `patches` object, Python validates and applies its
+exact-text patches through the **same** safe, journaled tool. No standalone LLM
+calls or deterministic-model fallback are used by this workflow.
+
+After every coding task the undo journal determines whether a real edit occurred.
+The final log records completed/incomplete files and test results. With
+`--allow-tests`, pytest runs after the editing tasks. `--max-edit-files 4`
+reduces the file limit; `--legacy-monolithic` restores the old single-crew
+planner/developer/explainer sequence. `--no-deterministic-fallback` is accepted
+for backwards CLI compatibility; the focused workflow never uses that fallback.
+
+The planner must explicitly identify relevant existing `.py` paths; a missing
+file list causes the run to stop without inventing targets. Model responses
+remain fallible; verify resulting edits and tests before deployment.
+
+### Strict focused-edit validation and retry
+
+The default focused workflow requires the developer to either invoke the patch tool
+successfully or return a **single JSON object** with a nonempty `patches` array.
+Every patch must contain exactly `filename`, `old_text`, and `new_text`, target the
+current selected file, and provide a unique nonempty source fragment. Narrative
+success claims, empty arrays, wrong paths, and no-op replacements are rejected.
+
+If an attempt yields no journaled edit, CrewAI runs **one** targeted retry with the
+specific validation error. A patch executor response is not considered success
+unless a journal entry appears. Partial patch applications are flagged as incomplete
+and are not retried automatically; inspect the journal and use the existing undo
+command if necessary. The final report separates `verified` (at least one journaled
+edit) from `complete` (verified without a remaining patch error). This is structural
+validation, **not** proof that the requested feature works; enable `--allow-tests`
+for available repository tests and validate `.doc` behavior with a real legacy
+binary Word fixture.

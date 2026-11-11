@@ -15,7 +15,14 @@ from config import Config, EXCLUDED
 from undo import record_edit
 
 
-def make_tools(cfg: Config, *, allow_tests: bool = False):
+def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
+    def emit(action, **details):
+        if on_event is not None:
+            try:
+                on_event({'action': action, **details})
+            except Exception:
+                pass  # Telemetry must never interfere with file safety.
+
     @tool('list_project_files')
     def list_project_files() -> str:
         """List Python files in the repository, including read-only paths."""
@@ -52,6 +59,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False):
     def patch_project_file(filename: str, old_text: str, new_text: str) -> str:
         """Replace one unique exact fragment in an existing Python file; syntax-check, back up, and write atomically."""
         try:
+            emit('patch_attempt', file=filename)
             path = cfg.file(filename, for_edit=True)
             if not old_text:
                 return 'ERROR: old_text must not be empty'
@@ -63,6 +71,9 @@ def make_tools(cfg: Config, *, allow_tests: bool = False):
             if count != 1:
                 return f'ERROR: Expected exactly one match; found {count}'
             revised = original.replace(old_text, new_text, 1)
+            if revised == original:
+                emit('patch_no_change', file=filename)
+                return 'ERROR: Patch would not change the file'
             if path.suffix.lower() == ".py":
                 ast.parse(revised, filename=str(path))
             run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '-' + uuid4().hex[:8]
@@ -87,15 +98,18 @@ def make_tools(cfg: Config, *, allow_tests: bool = False):
                 # Never leave an untracked edit when journaling fails.
                 os.replace(backup, path)
                 raise
+            emit('patch_success', file=filename, backup=str(backup))
             diff = ''.join(difflib.unified_diff(original.splitlines(True), revised.splitlines(True), fromfile=filename+' (before)', tofile=filename+' (after)'))
             return json.dumps({'status': 'updated', 'file': filename, 'backup': str(backup), 'diff': diff[:16000]})
         except (ValueError, OSError, UnicodeError, SyntaxError, PermissionError) as exc:
+            emit('patch_error', file=filename, error=f'{type(exc).__name__}: {exc}')
             return f'ERROR: {type(exc).__name__}: {exc}'
 
     @tool('preview_project_patch')
     def preview_project_patch(filename: str, old_text: str, new_text: str) -> str:
         """Preview a targeted exact-text patch without modifying files."""
         try:
+            emit('preview_attempt', file=filename)
             path = cfg.file(filename, for_edit=True)
             original = path.read_text(encoding='utf-8')
             count = original.count(old_text) if old_text else 0
@@ -106,6 +120,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False):
                 ast.parse(revised, filename=str(path))
             return ''.join(difflib.unified_diff(original.splitlines(True), revised.splitlines(True), fromfile=filename, tofile=filename+' (proposed)'))[:16000]
         except (ValueError, OSError, UnicodeError, SyntaxError, PermissionError) as exc:
+            emit('preview_error', file=filename, error=str(exc))
             return f'ERROR: {exc}'
 
     @tool('run_pytest')

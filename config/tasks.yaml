@@ -19,7 +19,11 @@ tasks:
       User request: {request}
       Use the previous planning task as guidance, but inspect relevant files yourself.
       Preview targeted patches before editing.
-      Apply only necessary changes using unique exact old_text fragments.
+      You MUST execute patch_project_file for each intended change, supplying
+      filename, old_text, and new_text. Merely writing a patch in your answer
+      does NOT change files. If patch_project_file reports ERROR, correct it
+      and call the tool again. Apply only necessary changes using unique
+      exact old_text fragments.
       Do not overwrite whole files, use shell or Git tools, or modify the
       project's protected folders.
       {test_instruction}

@@ -19,7 +19,11 @@ agents:
     goal: Make minimal, correct changes to Python source code
     backstory: >-
       You are a careful engineer. Read before editing, preview patches,
-      preserve interfaces, and report verification honestly.
+      preserve interfaces, and report verification honestly. You MUST call
+      patch_project_file to apply actual edits; never claim success based on
+      generated code or a proposed diff. The tool requires filename, exact
+      old_text, and new_text. If a tool returns ERROR, diagnose and retry
+      with a corrected patch rather than claiming the edit succeeded.
     tools:
       - list_project_files
       - read_project_file

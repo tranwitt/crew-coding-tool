@@ -1,10 +1,11 @@
 import argparse
+import json
 import os
 import shlex
 import sys
 import re
 import traceback
-from html import escape
+import ast
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,76 +66,6 @@ def clean_console(value):
     return value.replace('\r\n', '\n').replace('\r', '\n')
 
 
-def fence(value):
-    """Use a fence longer than any backtick sequence in tool/model output."""
-    longest = max((len(x) for x in re.findall(r'`+', value)), default=0)
-    marker = '`' * max(4, longest + 1)
-    return f'{marker}text\n{value.rstrip()}\n{marker}\n'
-
-
-def write_html_log(markdown_path):
-    """Render our structured run-log format using only the Python standard library."""
-    source = markdown_path.read_text(encoding='utf-8')
-    lines = source.splitlines()
-    sections = []
-    in_fence = False
-    fence_marker = ''
-    for line in lines:
-        stripped = line.strip()
-        if not in_fence and re.match(r'^`{4,}text$', stripped):
-            in_fence = True
-            fence_marker = stripped[:-4]
-            sections.append(('code_start', ''))
-        elif in_fence and stripped == fence_marker:
-            in_fence = False
-            sections.append(('code_end', ''))
-        elif in_fence:
-            sections.append(('code', line))
-        elif line.startswith('### '):
-            sections.append(('h3', line[4:]))
-        elif line.startswith('## '):
-            sections.append(('h2', line[3:]))
-        elif line.startswith('# '):
-            sections.append(('h1', line[2:]))
-        elif line.startswith('- **') and ':** ' in line:
-            key, value = line[4:].split(':** ', 1)
-            sections.append(('meta', (key, value)))
-        elif stripped:
-            sections.append(('p', line))
-    parts = []
-    code_lines = []
-    for kind, value in sections:
-        if kind == 'code_start':
-            code_lines = []
-        elif kind == 'code':
-            code_lines.append(value)
-        elif kind == 'code_end':
-            parts.append('<pre><code>' + escape('\n'.join(code_lines)) + '</code></pre>')
-        elif kind == 'meta':
-            parts.append('<div class="meta"><strong>' + escape(value[0]) + ':</strong> ' + escape(value[1]) + '</div>')
-        else:
-            parts.append(f'<{kind}>' + escape(value) + f'</{kind}>')
-    title = escape(markdown_path.stem)
-    page = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<title>{title} — CrewAI Log</title>
-<style>
-:root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-body {{ max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.55; }}
-h1, h2 {{ border-bottom: 1px solid #8885; padding-bottom: .4rem; }}
-h2 {{ margin-top: 2rem; }} h3 {{ margin-top: 1.5rem; }}
-pre {{ overflow-x: auto; padding: 1rem; border: 1px solid #8885; border-radius: 8px;
- background: #8881; white-space: pre-wrap; overflow-wrap: anywhere; }}
-code {{ font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
-.meta {{ margin: .25rem 0; overflow-wrap: anywhere; }}
-</style></head><body>{''.join(parts)}</body></html>"""
-    output = markdown_path.with_suffix('.html')
-    output.write_text(page, encoding='utf-8')
-    return output
-
-
 def run_with_log(log_path, metadata, callback):
     """Capture CrewAI's verbose transcript and append distinct task result sections."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,31 +85,31 @@ def run_with_log(log_path, metadata, callback):
     finally:
         sys.stdout, sys.stderr = old_out, old_err
         with log_path.open('w', encoding='utf-8') as log:
-            log.write('# CrewAI Coding Run\n\n')
+            log.write('CREWAI CODING RUN\n' + '=' * 72 + '\n')
             for key, value in metadata.items():
                 if key.startswith("_"):
                     continue
-                log.write(f'- **{key}:** {str(value).replace(chr(10), " ")}\n')
-            log.write('\n## Crew execution transcript\n\n')
-            log.write(fence(clean_console(''.join(chunks))))
+                log.write(f'{key}: {str(value).replace(chr(10), " ")}\n')
+            log.write('\n' + '=' * 72 + '\nCREW EXECUTION TRANSCRIPT\n' + '=' * 72 + '\n')
+            log.write(clean_console(''.join(chunks)).rstrip() + '\n')
             if result is not None:
                 task_outputs = getattr(result, 'tasks_output', None) or []
                 task_names = list(metadata.get('_task_names', []))
                 if task_outputs:
-                    log.write('\n## Task results\n\n')
+                    log.write('\n' + '=' * 72 + '\nTASK RESULTS\n' + '=' * 72 + '\n')
                     for index, task_output in enumerate(task_outputs):
                         name = task_names[index] if index < len(task_names) else f'task_{index + 1}'
                         output = str(getattr(task_output, 'raw', None) or task_output)
-                        log.write(f'### {name}\n\n' + fence(output) + '\n')
+                        log.write(f'\n--- {name} ---\n{output.rstrip()}\n')
                     if 'explain' in task_names:
                         index = task_names.index('explain')
                         if index < len(task_outputs):
                             output = str(getattr(task_outputs[index], 'raw', None) or task_outputs[index])
-                            log.write('## Explanation of work completed\n\n' + fence(output) + '\n')
-                log.write('\n## Final result\n\n' + fence(str(result)) + '\n')
+                            log.write('\nEXPLANATION OF WORK COMPLETED\n' + '-' * 72 + '\n' + output.rstrip() + '\n')
+                log.write('\nFINAL RESULT\n' + '-' * 72 + '\n' + str(result).rstrip() + '\n')
             if error:
-                log.write('\n## Execution error\n\n' + fence(clean_console(error)) + '\n')
-            log.write('\n_End of run._\n')
+                log.write('\nEXECUTION ERROR\n' + '-' * 72 + '\n' + clean_console(error).rstrip() + '\n')
+            log.write('\nEND OF RUN\n')
 
 HELP_GUIDE = """CrewAI Code Agent — detailed help
 =================================
@@ -218,7 +149,7 @@ OPTIONS
   --help-guide        This detailed explanation; no repo needed.
 
 FILES AND SAFETY
-  logs/       Timestamped Markdown and HTML execution logs.
+  logs/       Timestamped plain-text .log execution logs.
   backups/    Original file snapshots and undo metadata.
   config/     YAML definitions for planner, developer, and explainer.
   Undo refuses unsafe overwrites when a file has changed since its run.
@@ -241,7 +172,7 @@ def main():
   python main.py --help-guide
 
 Workflow: reasoning planner -> coding developer -> reasoning explainer.
-Outputs: logs/*.md and logs/*.html; backups/ contains undo data.
+Outputs: logs/*.log; backups/ contains undo data.
 Use --help-guide for setup, model configuration, safety, and all options.
 """
     )
@@ -254,16 +185,25 @@ Use --help-guide for setup, model configuration, safety, and all options.
     parser.add_argument('--backup-dir', help='Backup directory (default: standalone agent backups/; must be outside target project)')
     parser.add_argument('--allow-tests', action='store_true', help='Allow pytest execution (only in trusted/sandboxed environments)')
     parser.add_argument('--model', help='Override CODING_LLM_MODEL from .env (legacy alias)')
-    parser.add_argument('--log-dir', help='Markdown and HTML log directory (default: logs/ beside main.py)')
+    parser.add_argument('--check-models', action='store_true', help='Make a small live text request to each configured model, then exit (no repo required)')
+    parser.add_argument('--no-deterministic-fallback', action='store_true', help='Disable model-independent JSON patch fallback when CrewAI makes no edits')
+    parser.add_argument('--max-edit-files', type=int, default=6, help='Maximum targeted files handled by focused CrewAI developer tasks')
+    parser.add_argument('--legacy-monolithic', action='store_true', help='Use original single CrewAI kickoff for all tasks')
+    parser.add_argument('--edit-retries', type=int, default=0, help='Additional developer-only attempts when no edits were recorded (default: 0; optional)')
+    parser.add_argument('--log-dir', help='Plain-text .log directory (default: logs/ beside main.py)')
     parser.add_argument('--agents-config', help='Agents YAML path (default: config/agents.yaml)')
     parser.add_argument('--tasks-config', help='Tasks YAML path (default: config/tasks.yaml)')
     parser.add_argument('--env-file', help='Path to .env file (defaults to .env beside main.py)')
     parser.add_argument('--message', '-m', help='Required natural-language agent request for coding runs')
     args = parser.parse_args()
+    if not 1 <= args.max_edit_files <= 20:
+        parser.error('--max-edit-files must be between 1 and 20')
+    if args.edit_retries < 0 or args.edit_retries > 5:
+        parser.error('--edit-retries must be between 0 and 5')
     if args.help_guide:
         print(HELP_GUIDE)
         return
-    if not args.repo:
+    if not args.repo and not args.check_models:
         parser.error('--repo is required for coding, --undo, and --list-runs')
     if args.undo is not None or args.list_runs:
         try:
@@ -282,25 +222,45 @@ Use --help-guide for setup, model configuration, safety, and all options.
             parser.error(f'Undo failed: {exc}')
     env_file = Path(args.env_file).expanduser().resolve() if args.env_file else Path(__file__).resolve().parent / '.env'
     load_dotenv(dotenv_path=env_file, override=False)
-    # Independent LLM configurations; legacy LLM_* variables remain a fallback.
+    # Independent model configuration; no custom token/output limits.
     def model_config(prefix, override=None):
         model_name = override or os.getenv(f'{prefix}_LLM_MODEL') or os.getenv('LLM_MODEL', 'openai/gpt-4o')
         url = (os.getenv(f'{prefix}_LLM_BASE_URL') or os.getenv('LLM_BASE_URL') or '').strip() or None
         key = (os.getenv(f'{prefix}_LLM_API_KEY') or os.getenv('LLM_API_KEY') or os.getenv('OPENAI_API_KEY') or '').strip()
-        return {'model': model_name, 'base_url': url, 'api_key': key}
+        raw_context = (os.getenv(f'{prefix}_LLM_CONTEXT_WINDOW') or '').strip()
+        context_window = None
+        if raw_context:
+            try:
+                context_window = int(raw_context)
+            except ValueError:
+                parser.error(f'{prefix}_LLM_CONTEXT_WINDOW must be a positive integer')
+            if context_window <= 0:
+                parser.error(f'{prefix}_LLM_CONTEXT_WINDOW must be a positive integer')
+        raw_body = (os.getenv(f'{prefix}_LLM_EXTRA_BODY') or '').strip()
+        extra_body = None
+        if raw_body:
+            try:
+                extra_body = json.loads(raw_body)
+            except json.JSONDecodeError as exc:
+                parser.error(f'{prefix}_LLM_EXTRA_BODY must be valid JSON: {exc}')
+            if not isinstance(extra_body, dict):
+                parser.error(f'{prefix}_LLM_EXTRA_BODY must be a JSON object')
+        return {'model': model_name, 'base_url': url, 'api_key': key,
+                'context_window': context_window, 'extra_body': extra_body}
 
     coding_config = model_config('CODING', args.model)
     reasoning_config = model_config('REASONING')
     request = (args.message or '').strip()
-    if not request:
+    if not request and not args.check_models:
         parser.error('A coding request is required: pass --message "Describe the change" (or -m)')
     for label, settings in [('coding', coding_config), ('reasoning', reasoning_config)]:
         if not settings['api_key']:
             parser.error(f'Missing {label} API key: set {label.upper()}_LLM_API_KEY in .env')
-    try:
-        cfg = Config.create(args.repo, args.backup_dir, allowed_paths=args.allowed_paths, read_only_paths=args.read_only_paths)
-    except (ValueError, OSError) as exc:
-        parser.error(str(exc))
+    if not args.check_models:
+        try:
+            cfg = Config.create(args.repo, args.backup_dir, allowed_paths=args.allowed_paths, read_only_paths=args.read_only_paths)
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
 
     from crewai import Agent, Task, Crew, Process, LLM
 
@@ -310,10 +270,34 @@ Use --help-guide for setup, model configuration, safety, and all options.
         kwargs = {'model': settings['model'], 'api_key': settings['api_key']}
         if settings['base_url']:
             kwargs['base_url'] = settings['base_url']
+        if settings['context_window'] is not None:
+            kwargs['context_window_size'] = settings['context_window']
+        if settings['extra_body'] is not None:
+            kwargs['extra_body'] = settings['extra_body']
         return LLM(**kwargs)
 
     llms = {'coding': create_llm(coding_config), 'reasoning': create_llm(reasoning_config)}
-    tools = make_tools(cfg, allow_tests=args.allow_tests)
+    if args.check_models:
+        failed = False
+        for label, llm in llms.items():
+            try:
+                result = llm.call([{'role': 'user', 'content': 'Reply with exactly: OK'}])
+                print(f'{label} model responded: {str(result)[:200]}')
+            except Exception as exc:
+                failed = True
+                print(f'{label} model failed ({type(exc).__name__}): {exc}', file=sys.stderr)
+        if failed:
+            raise SystemExit(1)
+        print('Both models responded. This checks basic connectivity, not CrewAI tool calling.')
+        return
+    tool_events = []
+    def capture_tool_event(event):
+        event = {'timestamp': datetime.now(timezone.utc).isoformat(), **event}
+        tool_events.append(event)
+        # Console output is captured by run_with_log and stored in the .log file.
+        print('FILE_TOOL_EVENT ' + json.dumps(event, ensure_ascii=False), flush=True)
+
+    tools = make_tools(cfg, allow_tests=args.allow_tests, on_event=capture_tool_event)
     tool_lookup = {tool.name: tool for tool in tools}
     base = Path(__file__).resolve().parent
     agents_path = Path(args.agents_config).expanduser().resolve() if args.agents_config else base / 'config' / 'agents.yaml'
@@ -383,15 +367,46 @@ Use --help-guide for setup, model configuration, safety, and all options.
     if log_dir == cfg.root or log_dir.is_relative_to(cfg.root):
         parser.error('Log directory must be outside the target repository')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    log_path = log_dir / f'run-{stamp}.md'
+    log_path = log_dir / f'run-{stamp}.log'
 
     usage_result = [None]
+    verified_edits = [0]
+    attempts = [0]
+
+    from focused_crew import run_focused_crew
+
+    def edits_in_run():
+        entry = next((e for e in get_runs(cfg)
+                      if e['run_id'] == stamp and not e.get('undone')), None)
+        return entry['edits'] if entry else []
+
+    execution_status = {}
 
     def execute():
         print(f'Project: {cfg.root}\nBackups: {cfg.backup_root}\nCoding model: {coding_config["model"]}\nReasoning model: {reasoning_config["model"]}\nPytest enabled: {args.allow_tests}\n')
-        result = Crew(agents=list(agents.values()), tasks=tasks, process=Process.sequential, verbose=True).kickoff()
-        print('\n=== RESULT ===\n', result)
-        usage_result[0] = extract_usage(result)
+        if args.legacy_monolithic:
+            result = Crew(agents=list(agents.values()), tasks=tasks,
+                          process=Process.sequential, verbose=True).kickoff()
+            usage_result[0] = extract_usage(result)
+            verified_edits[0] = len(edits_in_run())
+            execution_status.update({'mode': 'legacy', 'verified_edits': verified_edits[0]})
+        else:
+            result, status = run_focused_crew(
+                cfg=cfg, request=request, agents=agents, task_defs=task_defs,
+                render=render, tool_lookup=tool_lookup, max_files=args.max_edit_files,
+                allow_tests=args.allow_tests, edits_in_run=edits_in_run,
+                Crew=Crew, Task=Task, Process=Process,
+            )
+            execution_status.update(status)
+            verified_edits[0] = len(edits_in_run())
+            usage_result[0] = status.get('usage')
+        print('\n=== VERIFIED EXECUTION STATUS ===')
+        print(json.dumps({k: v for k, v in execution_status.items() if k != 'usage'}, indent=2))
+        print(f'Journaled edits: {verified_edits[0]}')
+        if not verified_edits[0]:
+            print('WARNING: No files were changed. Model output is NOT proof of an edit.')
+        if execution_status.get('incomplete_files'):
+            print('WARNING: Incomplete files: ' + ', '.join(execution_status['incomplete_files']))
         return result
 
     token = ACTIVE_RUN.set(stamp)
@@ -405,7 +420,7 @@ Use --help-guide for setup, model configuration, safety, and all options.
             'Pytest enabled': args.allow_tests,
             'Agents config': agents_path,
             'Tasks config': tasks_path,
-            '_task_names': list(task_defs),
+            '_task_names': list(task_defs) if args.legacy_monolithic else [],
         }, execute)
     finally:
         ACTIVE_RUN.reset(token)
@@ -422,35 +437,41 @@ Use --help-guide for setup, model configuration, safety, and all options.
             print(f'\nUndo this run ({len(run_entry["edits"])} edit(s)):\n{undo_command}')
             if log_path.is_file():
                 with log_path.open('a', encoding='utf-8') as log:
-                    log.write('\n## Undo this run\n\n')
-                    log.write(fence(undo_command) + '\n')
+                    log.write('\nUNDO THIS RUN\n' + '-' * 72 + '\n')
+                    log.write(undo_command + '\n')
         else:
             print('\nUndo this run: unavailable (no recorded file edits).')
             if log_path.is_file():
                 with log_path.open('a', encoding='utf-8') as log:
-                    log.write('\n## Undo this run\n\n')
+                    log.write('\nUNDO THIS RUN\n' + '-' * 72 + '\n')
                     log.write('No recorded file edits; nothing to undo.\n')
         if usage_result[0] is not None:
             usage = usage_result[0]
-            usage_lines = ['## Provider-reported token usage (CrewAI)', '',
-                           f'- **Total tokens:** {usage["total"]:,}']
+            usage_lines = [f'Total tokens: {usage["total"]:,}']
             if usage['prompt'] is not None:
-                usage_lines.append(f'- **Prompt tokens:** {usage["prompt"]:,}')
+                usage_lines.append(f'Prompt tokens: {usage["prompt"]:,}')
             if usage['completion'] is not None:
-                usage_lines.append(f'- **Completion tokens:** {usage["completion"]:,}')
+                usage_lines.append(f'Completion tokens: {usage["completion"]:,}')
             print('\nProvider-reported token usage (CrewAI):')
-            for line in usage_lines[2:]:
-                print(line.removeprefix('- ').replace('**', ''))
+            for line in usage_lines:
+                print(line)
             if log_path.is_file():
                 with log_path.open('a', encoding='utf-8') as log:
-                    log.write('\n'.join(usage_lines) + '\n')
-        print(f'\nMarkdown log: {log_path}')
+                    log.write('\nPROVIDER-REPORTED TOKEN USAGE (CREWAI)\n' + '-' * 72 + '\n' + '\n'.join(usage_lines) + '\n')
         if log_path.is_file():
-            try:
-                html_path = write_html_log(log_path)
-                print(f'HTML log: {html_path}')
-            except Exception as exc:
-                print(f'WARNING: Could not generate HTML log: {exc}', file=sys.stderr)
+            with log_path.open('a', encoding='utf-8') as log:
+                log.write('\nFILE EDIT VERIFICATION\n' + '-' * 72 + '\n')
+                log.write(f'Journaled edits: {len(run_entry["edits"]) if run_entry else 0}\n')
+                log.write(f'Developer retry attempts: {attempts[0]}\n')
+                log.write('VERIFIED STATUS\n' + json.dumps({k: v for k, v in execution_status.items() if k != 'usage'}, indent=2) + '\n')
+                log.write(f'Tool events: {len(tool_events)}\n')
+                for event in tool_events:
+                    log.write(json.dumps(event, ensure_ascii=False) + '\n')
+                if not run_entry:
+                    log.write('WARNING: No files were changed.\n')
+        print(f'\nLog file: {log_path}')
+        if not run_entry:
+            raise SystemExit(2)
 
 
 if __name__ == '__main__':

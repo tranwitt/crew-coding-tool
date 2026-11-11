@@ -1,1 +1,1 @@
-Execution logs are stored here as paired `.md` and `.html` files. HTML can be opened in a browser. Logs may contain sensitive code and model output.
+Run transcripts are written here as timestamped .log files. Each run produces one plain-text log.
