@@ -1,4 +1,6 @@
-# model selects one of the two .env configurations: reasoning or coding.
+# The pipeline uses three agents: planner (selects files), developer (edits one
+# file per task) and explainer (explains an edit run, or answers an --analyze
+# request). model selects one of the two .env configurations: reasoning or coding.
 # Tools are offered only when the model can call them (see --tool-mode); every
 # agent also runs tool-free. Optional per agent: use_system_prompt: false for
 # models that reject the system role.

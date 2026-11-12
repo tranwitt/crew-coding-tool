@@ -1,4 +1,4 @@
-"""End-to-end focused workflow with scripted "models" of differing capability.
+"""End-to-end pipelines with scripted "models" of differing capability.
 
 Config, the patch tool and the undo journal are real; only CrewAI is replaced,
 so these tests run without a model or the crewai package.
@@ -26,7 +26,7 @@ except ImportError:  # Minimal stand-in exposing the tool decorator API used her
 
 from agent_tools import make_tools
 from config import Config
-from focused_crew import run_focused_crew
+from pipeline import CrewRunner, run_analysis_pipeline, run_edit_pipeline
 from undo import ACTIVE_RUN, get_runs, undo_run
 
 APP = (
@@ -80,17 +80,22 @@ class FlowTests(unittest.TestCase):
         entry = next((e for e in get_runs(self.cfg) if e['run_id'] == 'testrun'), None)
         return entry['edits'] if entry else []
 
-    def run_flow(self, model, tool_modes, request='Make the greeting friendlier', **extra):
-        calls = []
-        with_tools = {'planner': FakeAgent('planner', [self.tools['read_project_file']]),
-                      'developer': FakeAgent('developer', self.tools.values())}
+    def runner(self, model, tool_modes, calls):
+        read_only = [self.tools['read_project_file']]
+        with_tools = {'planner': FakeAgent('planner', read_only),
+                      'developer': FakeAgent('developer', self.tools.values()),
+                      'explainer': FakeAgent('explainer', read_only)}
         without = {name: FakeAgent(name, []) for name in with_tools}
-        _, status = run_focused_crew(
-            cfg=self.cfg, request=request, agents=with_tools, text_agents=without,
-            tool_modes=tool_modes, task_defs={}, render=str, tool_lookup=self.tools,
-            max_files=6, allow_tests=False, edits_in_run=self.edits,
-            Crew=crew_for(model, calls), Task=FakeTask, Process=types.SimpleNamespace(sequential=1),
-            **extra)
+        return CrewRunner(agents=with_tools, text_agents=without, tool_modes=tool_modes,
+                          Crew=crew_for(model, calls), Task=FakeTask,
+                          Process=types.SimpleNamespace(sequential=1))
+
+    def run_flow(self, model, tool_modes, request='Make the greeting friendlier', explain=False):
+        calls = []
+        status = run_edit_pipeline(
+            cfg=self.cfg, request=request, runner=self.runner(model, tool_modes, calls),
+            patch_tool=self.tools['patch_project_file'], edits_in_run=self.edits,
+            max_files=6, explain=explain)
         return status, calls
 
     def test_model_without_tool_calling_edits_through_text(self):
@@ -134,7 +139,7 @@ class FlowTests(unittest.TestCase):
         status, calls = self.run_flow(model, {'planner': 'tools', 'developer': 'tools'})
         self.assertEqual(status['completed_files'], ['app.py'])
         self.assertEqual(len(calls), 2)
-        self.assertEqual(status['tool_modes']['developer_final'], 'tools')
+        self.assertEqual(status['tool_modes']['developer'], 'tools')
 
     def test_failing_tool_mode_falls_back_to_text(self):
         def model(task):
@@ -146,7 +151,7 @@ class FlowTests(unittest.TestCase):
 
         status, calls = self.run_flow(model, {'planner': 'tools', 'developer': 'tools'})
         self.assertEqual(status['completed_files'], ['app.py'])
-        self.assertEqual(status['tool_modes']['developer_final'], 'text')
+        self.assertEqual(status['tool_modes']['developer'], 'text')
         self.assertEqual([bool(c.agent.tools) for c in calls], [True, False, True, False])
 
     def test_partial_application_retries_only_the_missing_edit(self):
@@ -200,6 +205,53 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.app.read_text(), APP)
         self.assertIn('SyntaxError', status['reports'][0]['errors'][0])
         self.assertEqual(len(calls), 3)  # plan + two text attempts
+
+
+    def test_explanation_is_built_from_the_verified_diff(self):
+        def model(task):
+            if task.agent.name == 'planner':
+                return 'FILE: app.py'
+            if task.agent.name == 'developer':
+                return BLOCK
+            self.assertEqual(task.agent.tools, {})
+            seen.append(task.description)
+            return '## Task overview\nGreeting changed.'
+
+        seen = []
+        status, _ = self.run_flow(model, {'planner': 'text', 'developer': 'text'}, explain=True)
+        self.assertEqual(status['report'], '## Task overview\nGreeting changed.')
+        self.assertIn('+    return "Hello, " + name + "!"', seen[0])
+        self.assertIn('- app.py: changed', seen[0])
+
+    def test_analysis_run_reports_and_never_writes(self):
+        def model(task):
+            if task.agent.name == 'planner':
+                self.assertIn('must be read', task.description)
+                return 'FILE: app.py - holds the greeting'
+            self.assertEqual(task.agent.name, 'explainer')
+            self.assertIn('<file path="app.py">\n' + APP, task.description)
+            return 'greet() concatenates "Hello " and the name.'
+
+        calls = []
+        status = run_analysis_pipeline(
+            cfg=self.cfg, request='How does greet work?', max_files=6,
+            runner=self.runner(model, {'planner': 'text', 'explainer': 'text'}, calls))
+        self.assertEqual(status['report'], 'greet() concatenates "Hello " and the name.')
+        self.assertIsNone(status['error'])
+        self.assertEqual(self.app.read_text(), APP)
+        self.assertEqual(self.edits(), [])
+
+    def test_analysis_failure_is_reported_without_a_report(self):
+        def model(task):
+            if task.agent.name == 'planner':
+                return 'FILE: app.py'
+            raise RuntimeError('503 upstream unavailable')
+
+        status = run_analysis_pipeline(
+            cfg=self.cfg, request='How does greet work?', max_files=6,
+            runner=self.runner(model, {'planner': 'text', 'explainer': 'tools'}, []))
+        self.assertIsNone(status['report'])
+        self.assertIn('503', status['error'])
 
 
 if __name__ == '__main__':
