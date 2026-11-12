@@ -8,8 +8,10 @@ COMMON = {'repo', 'request', 'tool_guidance'}
 
 # Per stage: placeholders the host can fill, and those the pipeline cannot work without.
 STAGES = {
-    'select': {'allowed': {'listing', 'file_scope', 'purpose'}, 'required': {'listing'}},
-    'edit': {'allowed': {'filename', 'file_content', 'edit_format', 'feedback', 'plan'},
+    'select': {'allowed': {'listing', 'file_scope', 'purpose', 'new_file_guidance'}, 'required': {'listing'}},
+    'create': {'allowed': {'filename', 'create_format', 'feedback', 'plan', 'created_files'},
+               'required': {'filename', 'create_format', 'feedback'}},
+    'edit': {'allowed': {'filename', 'file_content', 'edit_format', 'feedback', 'plan', 'created_files'},
              'required': {'filename', 'file_content', 'edit_format', 'feedback'}},
     'explain': {'allowed': {'outcome', 'diff', 'tests'}, 'required': {'outcome', 'diff'}},
     'analyze': {'allowed': {'listing', 'file_contents', 'omitted'}, 'required': {'file_contents'}},
@@ -35,6 +37,7 @@ class Stage:
     description: str
     expected_output: str
     tool_guidance: dict = field(default_factory=dict)
+    new_file_guidance: str = ''
 
     def render(self, mode, **values):
         """Return the task description for an agent running in 'tools' or 'text' mode."""
@@ -77,7 +80,11 @@ def load_tasks(path, agent_names):
         missing = STAGES[name]['required'] - used
         if missing:
             raise ValueError(f'Stage {name}: description must contain {sorted("{" + p + "}" for p in missing)}')
-        stages[name] = Stage(name, spec['agent'], spec['description'], spec['expected_output'], dict(guidance))
+        new_file_guidance = spec.get('new_file_guidance', '')
+        if not isinstance(new_file_guidance, str) or (new_file_guidance and name != 'select'):
+            raise ValueError(f'Stage {name}: new_file_guidance is a string, and only the select stage has one')
+        stages[name] = Stage(name, spec['agent'], spec['description'], spec['expected_output'],
+                             dict(guidance), new_file_guidance.strip())
     return stages
 
 

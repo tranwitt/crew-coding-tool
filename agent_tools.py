@@ -105,6 +105,53 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
             emit('patch_error', file=filename, error=f'{type(exc).__name__}: {exc}')
             return f'ERROR: {type(exc).__name__}: {exc}'
 
+    @tool('create_project_file')
+    def create_project_file(filename: str, content: str) -> str:
+        """Create a new Python file that does not exist yet; syntax-check, write, and journal it for undo."""
+        try:
+            emit('create_attempt', file=filename)
+            path = cfg.file(filename, must_exist=False, for_edit=True)
+            if path.exists():
+                return 'ERROR: File already exists; use patch_project_file to change it'
+            if not content.strip():
+                return 'ERROR: content must not be empty'
+            if not content.endswith('\n'):
+                content += '\n'
+            data = content.encode('utf-8')
+            if len(data) > 300_000:
+                return 'ERROR: File too large'
+            ast.parse(content, filename=str(path))
+            missing, parent = [], path.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            created_dirs = []
+            try:
+                for directory in reversed(missing):
+                    directory.mkdir()
+                    created_dirs.append(directory.relative_to(cfg.root).as_posix())
+                # Exclusive mode: never overwrite a file that appeared in the meantime.
+                with open(path, 'xb') as output:
+                    output.write(data)
+                    output.flush()
+                    os.fsync(output.fileno())
+                record_edit(cfg, filename, None, None, data, created_dirs=created_dirs)
+            except Exception:
+                # Never leave an untracked file or directory behind.
+                if path.is_file() and path.read_bytes() == data:
+                    path.unlink()
+                for directory in reversed(created_dirs):
+                    try:
+                        (cfg.root / directory).rmdir()
+                    except OSError:
+                        pass
+                raise
+            emit('create_success', file=filename)
+            return json.dumps({'status': 'created', 'file': filename, 'lines': content.count('\n')})
+        except (ValueError, OSError, UnicodeError, SyntaxError, PermissionError) as exc:
+            emit('create_error', file=filename, error=f'{type(exc).__name__}: {exc}')
+            return f'ERROR: {type(exc).__name__}: {exc}'
+
     @tool('preview_project_patch')
     def preview_project_patch(filename: str, old_text: str, new_text: str) -> str:
         """Preview a targeted exact-text patch without modifying files."""
@@ -145,4 +192,5 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f'ERROR: {exc}'
 
-    return [list_project_files, read_project_file, preview_project_patch, patch_project_file, run_pytest]
+    return [list_project_files, read_project_file, preview_project_patch, patch_project_file,
+            create_project_file, run_pytest]

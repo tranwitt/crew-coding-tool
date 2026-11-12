@@ -47,14 +47,15 @@ No token or output limit is imposed by this tool.
 
 There is one pipeline with two run types.
 
-**Edit run** (default): select files → edit each file → run tests → explain.
+**Edit run** (default): select files → create new files → edit each file → run
+tests and repair → explain.
 
 ```bash
 python main.py --repo "$HOME/projects/sample" --allow-tests --message "Improve error handling in the loader"
 ```
 
 **Analysis run** (`--analyze`): select files → answer the request. It never
-writes to the repository; the patch tool is withheld from every agent.
+writes to the repository; the patch and create tools are withheld from every agent.
 
 ```bash
 python main.py --repo "$HOME/projects/sample" --analyze --message "Explain how configuration is loaded"
@@ -62,23 +63,34 @@ python main.py --repo "$HOME/projects/sample" --analyze --message "Explain how c
 
 | Exit code | Edit run | Analysis run |
 | --- | --- | --- |
-| 0 | at least one edit was written and journaled | a report was produced |
+| 0 | at least one change was written and journaled | a report was produced |
 | 1 | the run crashed | no report was produced, or the run crashed |
 | 2 | nothing was changed | (not used) |
+| 3 | changes were written, but pytest fails afterwards (`--allow-tests`) | (not used) |
 
 The stages:
 
 1. **Select files.** The host lists the Python files with their top-level
-   definitions and the planner names the relevant ones. If it names no existing
-   file, paths written in the request are used, then a keyword match on file and
-   symbol names. Paths are never invented.
-2. **Edit** (edit runs). One developer task per file, with the current file
-   content and the plan in the task. Up to `--max-edit-files` files (default 6).
-3. **Verify** (edit runs). A change counts only when it is in the undo journal.
-   With `--allow-tests`, pytest runs after the edits.
-4. **Explain / analyse.** The explainer describes an edit run from the
-   host-computed diff, per-file outcome and test result, or answers an analysis
+   definitions and the planner names the relevant ones (`FILE:` lines) and, on
+   edit runs, files that need to be created (`NEW:` lines). If it names nothing
+   usable, paths written in the request are used, then a keyword match on file
+   and symbol names. Existing paths are never invented.
+2. **Create** (edit runs). One developer task per new file. The file is
+   syntax-checked, written and journaled; it must not exist yet and must pass the
+   same path rules as an edit.
+3. **Edit** (edit runs). One developer task per file, with the current file
+   content, the plan and the files created earlier in the run. New and edited
+   files together are limited by `--max-edit-files` (default 6).
+4. **Test and repair** (edit runs with `--allow-tests`). pytest runs on `tests/`
+   before the edits and again after them. If it fails afterwards, each file the
+   run changed or created gets a task with the end of the pytest output, and
+   pytest runs again. `--repair-rounds N` sets the number of rounds (default 1,
+   `0` disables). Files the run did not touch are never repaired.
+5. **Explain / analyse.** The explainer describes an edit run from the
+   host-computed diff, per-file outcome and test results, or answers an analysis
    request from the selected files. `--no-explain` skips this stage for edit runs.
+
+A change counts only when it is in the undo journal.
 
 ## Model-independent editing
 
@@ -119,7 +131,8 @@ python main.py --check-models
 `--agents-config`. `{repo}` and `{request}` are replaced in agent text.
 
 - Tool names: `list_project_files`, `read_project_file`, `preview_project_patch`,
-  `patch_project_file`, `run_pytest` (the last needs `--allow-tests`).
+  `patch_project_file`, `create_project_file`, `run_pytest` (the last needs
+  `--allow-tests`).
 - `use_system_prompt: false` is available for models that reject the system role.
 
 `config/tasks.yaml` defines the stages: which agent runs each one and the prompt
@@ -128,7 +141,8 @@ it receives. Use another file with `--tasks-config`.
 | Stage | Runs in | Default agent |
 | --- | --- | --- |
 | `select` | every run | planner |
-| `edit` | edit runs | developer |
+| `create` | edit runs; remove the stage to forbid new files | developer |
+| `edit` | edit runs, and repair rounds | developer |
 | `explain` | edit runs; remove the stage to skip it | explainer |
 | `analyze` | `--analyze` runs | explainer |
 
@@ -146,15 +160,16 @@ undefined agent is rejected before any model is called.
 
 ## Scope and safety
 
-- Only existing `.py` files are read or edited; the crew cannot create files.
-- `--allowed-paths` limits editing to the listed files or directories;
+- Only `.py` files are read, edited or created. Nothing is ever deleted or
+  overwritten wholesale; a new file cannot replace an existing one.
+- `--allowed-paths` limits editing and file creation to the listed files or directories;
   `--read-only-paths` can be read but never edited.
 - Symlink escapes, protected directories, secrets files and binary files are
-  rejected. Every patch is syntax-checked before it is written.
+  rejected. Every patch and every new file is syntax-checked before it is written.
 - Running tests executes project code: use `--allow-tests` only for trusted
   projects or in a sandbox.
-- A journaled edit proves that a change was written, not that it is correct.
-  Review the diff and run your tests.
+- A journaled change proves that something was written, not that it is correct.
+  Passing tests only prove what your tests cover. Review the diff.
 
 ## Logs and backups
 
@@ -175,7 +190,8 @@ python main.py --repo "$HOME/projects/sample" --list-runs
 python main.py --repo "$HOME/projects/sample" --undo RUN_ID
 ```
 
-Undo restores every file a run patched. It refuses to overwrite a file changed
+Undo restores every file a run patched and removes the files (and empty
+directories) it created. It refuses to overwrite a file changed
 since the run, to undo an older run while a newer one is outstanding, and to use
 an altered backup. It does not reverse side effects of pytest. If the run used
 `--backup-dir`, pass the same directory when undoing; the exact command is
@@ -193,7 +209,7 @@ printed after each edit run.
 | `task_config.py` | Load and validate the stage prompts in `tasks.yaml` |
 | `tool_probe.py` | Check whether a model really calls CrewAI tools |
 | `models.py` | Model settings from `.env`; `--check-models` |
-| `agent_tools.py` | Read, preview, patch and pytest tools |
+| `agent_tools.py` | Read, preview, patch, create and pytest tools |
 | `config.py` | Path rules for the target repository |
 | `undo.py` | Edit journal and undo |
 | `run_log.py` | Console capture and log files |

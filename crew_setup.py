@@ -33,7 +33,7 @@ def build_agents(specs, llms, tool_lookup, Agent, *, variables=None, withhold=()
     """Return ``(agents, text_agents)``: each agent with its tools, and without any.
 
     ``withhold`` names tools that no agent receives in this run (an analysis run
-    withholds the patch tool whatever the YAML says).
+    withholds the writing tools whatever the YAML says).
     """
     def render(text):
         for token, replacement in (variables or {}).items():

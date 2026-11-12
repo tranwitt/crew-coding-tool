@@ -11,6 +11,8 @@ Accepted answer formats, in order of preference:
 3. The complete updated file in a single fenced code block
 4. The literal sentinel ``NO_CHANGES_NEEDED``
 
+A new file is returned as one fenced code block (``parse_new_file``).
+
 Matching is tolerant of trailing whitespace, line endings and uniform
 indentation shifts, but a match must always be unique. Nothing here writes
 files: path checks, syntax checks, backups and the undo journal stay in
@@ -193,6 +195,8 @@ def _fenced_blocks(raw: str):
                 language = None
         elif language is not None:
             body.append(line)
+    if language is not None and body:
+        blocks.append((language, '\n'.join(body)))  # Closing fence forgotten at the end.
     return blocks
 
 
@@ -244,6 +248,32 @@ def parse_edits(raw, filename: str, source: str):
         'The answer contains no edits in an accepted format. A description or a bare '
         'code snippet does not change the file: reply with SEARCH/REPLACE blocks '
         f'(or exactly {NO_CHANGE_SENTINEL}).')
+
+
+def create_instructions(filename: str) -> str:
+    """Prompt text describing how to return a new file."""
+    return (
+        f'Reply with the complete content of {filename} in exactly one ```python code '
+        'block. Write out every line of the file: no placeholders such as "..." or '
+        '"rest of the code". Text outside the code block is ignored.'
+    )
+
+
+def parse_new_file(raw, filename: str) -> str:
+    """Return the content of a new file from a model answer, or raise EditError."""
+    blocks = [(language, body) for language, body in _fenced_blocks(str(raw or '')) if body.strip()]
+    chosen = ([body for language, body in blocks if language in ('python', 'py', 'python3')]
+              or [body for language, body in blocks if not language])
+    if len(chosen) != 1:
+        raise EditError(f'Expected exactly one ```python code block with the complete content of '
+                        f'{filename}; found {len(chosen)}.')
+    body = chosen[0]
+    try:
+        ast.parse(body)
+    except SyntaxError as exc:
+        raise EditError(f'The code block is not valid Python ({exc.msg}, line {exc.lineno}).') from exc
+    _check_elision(body, '', 'The code block')
+    return body.rstrip('\n') + '\n'
 
 
 # --------------------------------------------------------------------------

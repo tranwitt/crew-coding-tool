@@ -32,10 +32,11 @@ SETUP
   3. Use --repo to select the LOCAL Python repository to inspect/edit.
 
 RUN TYPES
-  Edit run (default)   select files -> edit each file -> run tests (with
-                       --allow-tests) -> explain. Succeeds (exit 0) when at
-                       least one edit was written and journaled; exit 2 when
-                       nothing was changed.
+  Edit run (default)   select files -> create new files -> edit each file ->
+                       run tests and repair (with --allow-tests) -> explain.
+                       Exit 0 when at least one change was written and
+                       journaled; 2 when nothing was changed; 3 when changes
+                       were written but pytest fails afterwards.
   Analysis run         --analyze: select files -> answer the request. Never
                        writes to the repository. Succeeds (exit 0) when a
                        report was produced; exit 1 otherwise.
@@ -63,7 +64,9 @@ OPTIONS
   --repo PATH         Target Python repository; required for runs and undo.
   -m, --message TEXT  The request; quote messages with spaces.
   --analyze           Read-only analysis run; see RUN TYPES.
-  --allow-tests       Run pytest after edits (trusted repositories only).
+  --allow-tests       Run pytest before and after edits (trusted repositories only).
+  --repair-rounds N   After failing tests, let the crew fix the files it changed
+                      and rerun pytest, up to N times (default 1; 0 disables).
   --no-explain        Skip the explanation stage of an edit run (one model call).
   --max-edit-files N  Most files handled in one run (default 6).
   --edit-retries N    Extra attempts per file after the built-in ones.
@@ -110,6 +113,8 @@ def build_parser():
     add('--read-only-paths', help='Comma-separated project-relative files/directories that can be read but never edited')
     add('--backup-dir', help='Backup directory (default: standalone agent backups/; must be outside target project)')
     add('--allow-tests', action='store_true', help='Allow pytest execution (only in trusted/sandboxed environments)')
+    add('--repair-rounds', type=int, default=1,
+        help='With --allow-tests: rounds of fixing the changed files after failing tests (default 1; 0 disables)')
     add('--no-explain', action='store_true', help='Skip the explanation stage after an edit run')
     add('--model', help='Override CODING_LLM_MODEL from .env')
     add('--check-models', action='store_true', help='Test connectivity and tool calling of each configured model, then exit (no repo required)')
@@ -141,7 +146,8 @@ def run_undo(args, parser):
         result = undo_run(cfg, args.undo)
         print(f"Restored {len(result['restored_files'])} file(s) from run {result['run_id']}")
         for filename in result['restored_files']:
-            print(f'  {filename}')
+            removed = filename in result.get('removed_files', [])
+            print(f'  {filename}' + (' (removed: the run created it)' if removed else ''))
     except (ValueError, OSError) as exc:
         parser.error(f'Undo failed: {exc}')
 
@@ -163,7 +169,7 @@ def report_run(*, args, cfg, stamp, log_path, status, tool_events):
         undo_command = f'python main.py --repo {shlex.quote(str(cfg.root))} --undo {shlex.quote(stamp)}'
         if args.backup_dir:
             undo_command += f' --backup-dir {shlex.quote(str(cfg.backup_root))}'
-        print(f'\nUndo this run ({len(edits)} edit(s)):\n{undo_command}')
+        print(f'\nUndo this run ({len(edits)} journaled change(s)):\n{undo_command}')
         append_section(log_path, 'UNDO THIS RUN', undo_command)
     elif not args.analyze:
         print('\nUndo this run: unavailable (no recorded file edits).')
@@ -187,7 +193,12 @@ def report_run(*, args, cfg, stamp, log_path, status, tool_events):
 
     if args.analyze:
         return 0 if report else 1
-    return 0 if edits else 2
+    if not edits:
+        return 2
+    if status.get('tests_passed') is False:
+        print('WARNING: changes were written, but pytest fails afterwards (exit code 3).')
+        return 3
+    return 0
 
 
 def main():
@@ -197,6 +208,8 @@ def main():
         parser.error('--max-edit-files must be between 1 and 20')
     if not 0 <= args.edit_retries <= 5:
         parser.error('--edit-retries must be between 0 and 5')
+    if not 0 <= args.repair_rounds <= 3:
+        parser.error('--repair-rounds must be between 0 and 3')
     if args.max_inline_chars < 1000:
         parser.error('--max-inline-chars must be at least 1000')
     if args.help_guide:
@@ -259,7 +272,7 @@ def main():
             specs, llms, tool_lookup, Agent,
             variables={'{repo}': str(cfg.root), '{request}': request},
             # An analysis run must not be able to write, whatever the YAML grants.
-            withhold=('patch_project_file',) if args.analyze else ())
+            withhold=('patch_project_file', 'create_project_file') if args.analyze else ())
     except (OSError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
         parser.error(f'Invalid YAML configuration: {exc}')
 
@@ -287,7 +300,8 @@ def main():
         else:
             status.update(run_edit_pipeline(
                 cfg=cfg, request=request, runner=runner, tasks=tasks,
-                patch_tool=tool_lookup['patch_project_file'], pytest_tool=tool_lookup['run_pytest'],
+                patch_tool=tool_lookup['patch_project_file'], create_tool=tool_lookup['create_project_file'],
+                pytest_tool=tool_lookup['run_pytest'], repair_rounds=args.repair_rounds,
                 edits_in_run=edits_in_run, max_files=args.max_edit_files,
                 allow_tests=args.allow_tests, max_inline_chars=args.max_inline_chars,
                 extra_attempts=args.edit_retries, explain=not args.no_explain))

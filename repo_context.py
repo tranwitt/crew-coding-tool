@@ -12,6 +12,7 @@ LISTED_FILES = 400
 
 _PATH = re.compile(r'(?<![\w/.-])(?:[\w.-]+/)*[\w.-]+\.py(?![\w/.-])')
 _FILE_LINE = re.compile(r'(?im)^[\s>*\-\d.)]*\**FILE\**\s*:\s*(.+)$')
+_NEW_LINE = re.compile(r'(?im)^[\s>*\-\d.)]*\**NEW\**\s*:\s*(.+)$')
 _STOPWORDS = frozenset((
     'the and for with from that this into add adds use using make change changes '
     'update fix file files code python function class method should when not all '
@@ -99,6 +100,29 @@ def files_named_in(text, cfg, limit, *, for_edit=True):
     return (scan(marked) if marked else []) or scan(text)
 
 
+def new_files_named_in(text, cfg, limit):
+    """Paths on ``NEW: path`` lines that do not exist yet and may be created.
+
+    Only explicitly marked lines count, and each path passes the same rules as
+    an edit (inside the project, .py, not protected, within --allowed-paths).
+    """
+    names = []
+    for line in _NEW_LINE.findall(text):
+        match = _PATH.search(line)
+        if not match or len(names) == limit:
+            continue
+        name = match.group(0)
+        while name.startswith('./'):
+            name = name[2:]
+        try:
+            path = cfg.file(name, must_exist=False, for_edit=True)
+        except (ValueError, OSError):
+            continue
+        if name not in names and not path.exists():
+            names.append(name)
+    return names
+
+
 def files_matching_request(request, files, symbols, limit):
     """Last resort when the planner names nothing usable: rank by word overlap."""
     words = {w for w in re.findall(r'[a-z_][a-z0-9_]{2,}', request.lower()) if w not in _STOPWORDS}
@@ -118,20 +142,24 @@ def files_matching_request(request, files, symbols, limit):
 
 
 def run_diffs(cfg, edits, budget=20000):
-    """Unified diff per file for a run's journal entries: first backup vs. file now."""
+    """Unified diff per file for a run's journal entries: first backup vs. file now.
+
+    A file the run created has no backup and is diffed against nothing.
+    """
     originals = {}
     for edit in edits:
         originals.setdefault(edit['file'], edit['backup'])
     parts = []
     for filename, backup in originals.items():
         try:
-            before = Path(backup).read_bytes().decode('utf-8')
+            before = Path(backup).read_bytes().decode('utf-8') if backup else ''
             after = cfg.file(filename).read_bytes().decode('utf-8')
         except (ValueError, OSError, UnicodeError) as exc:
             parts.append(f'{filename}: diff unavailable ({exc})\n')
             continue
         parts.append(''.join(difflib.unified_diff(
             before.splitlines(True), after.splitlines(True),
-            fromfile=filename + ' (before)', tofile=filename + ' (after)')))
+            fromfile=(filename + ' (before)') if backup else '/dev/null (new file)',
+            tofile=filename + ' (after)')))
     text = '\n'.join(parts)
     return text if len(text) <= budget else text[:budget] + '\n... (diff truncated)\n'

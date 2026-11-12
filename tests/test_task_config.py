@@ -27,7 +27,7 @@ def with_stage(name, **changes):
 
 class TaskConfigTests(unittest.TestCase):
     def test_default_configuration_is_valid_and_complete(self):
-        self.assertEqual(set(load_tasks(DEFAULT, AGENTS)), {'select', 'edit', 'explain', 'analyze'})
+        self.assertEqual(set(load_tasks(DEFAULT, AGENTS)), {'select', 'create', 'edit', 'explain', 'analyze'})
 
     def test_inserted_text_is_never_rescanned(self):
         source = 'print(f"{request} and {filename}")'
@@ -37,7 +37,7 @@ class TaskConfigTests(unittest.TestCase):
     def test_tool_guidance_follows_the_mode(self):
         stage = load_tasks(DEFAULT, AGENTS)['edit']
         values = dict(repo='/r', request='q', filename='a.py', file_content='C', edit_format='F',
-                      feedback='', plan='P')
+                      feedback='', plan='P', created_files='(none)')
         self.assertIn('patch_project_file(filename', stage.render('tools', **values))
         self.assertIn('You have NO tools', stage.render('text', **values))
         self.assertNotIn('{', stage.render('text', **values))

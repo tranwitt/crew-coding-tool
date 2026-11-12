@@ -2,6 +2,7 @@
 # that runs it. Edit the wording freely; the host fills in the {placeholders}.
 #
 #   select   choose the files a run works on          (every run)
+#   create   write one new file                       (edit runs; remove the stage to forbid new files)
 #   edit     change one file                          (edit runs)
 #   explain  describe what an edit run did            (edit runs; remove the stage to skip it)
 #   analyze  answer the request without editing       (--analyze runs)
@@ -15,9 +16,16 @@ tasks:
   # {listing}    required. Python files with their top-level definitions.
   # {file_scope} "editable Python files" (edit run) or "Python files" (analysis run).
   # {purpose}    "must be edited" or "must be read to answer the request".
-  # The host reads the files from "FILE: path" lines in the answer.
+  # {new_file_guidance} the new_file_guidance text below on edit runs that may
+  #              create files; empty otherwise.
+  # The host reads existing files from "FILE: path" lines in the answer and
+  # files to create from "NEW: path" lines.
   select:
     agent: planner
+    new_file_guidance: >-
+      If the request needs a Python file that does not exist yet, add a line
+      "NEW: path/to/new_file.py - one sentence saying what it contains" for it.
+      Create a file only when the code does not belong in an existing one.
     tool_guidance:
       tools: You may use your read-only tools to inspect files before answering.
       text: "You have no tools in this task and need none: do not attempt tool calls."
@@ -31,14 +39,48 @@ tasks:
       </files>
       Decide which of these existing files {purpose}. Answer with one line per file, most important first, in exactly this form:
       FILE: path/to/file.py - one sentence saying why
+      {new_file_guidance}
       Then add essential interface constraints as short bullet points. Use only paths from the list. Limit to 600 words. Do not write code and do not edit.
     expected_output: "FILE: lines naming existing Python files, then brief constraints."
+
+  # {filename}      required. The file to create; it does not exist yet.
+  # {create_format} required. How to return the file so the host can write it.
+  # {feedback}      required. Empty on the first attempt; the validation error on a retry.
+  # {plan}          The select stage's answer, shortened.
+  # {created_files} Files created earlier in this run, so imports and names match.
+  create:
+    agent: developer
+    tool_guidance:
+      tools: >-
+        You may call create_project_file(filename, content) directly. Unless that
+        tool confirms "status": "created", your final answer must contain the
+        file in the format below; the host application writes it.
+      text: >-
+        You have NO tools in this task. Do not attempt tool calls and ignore any
+        instruction to call one: the host application writes the file you return.
+    description: |-
+      Repository: {repo}
+      User request: {request}
+      Plan from the architect (context only; other files are handled separately):
+      <plan>
+      {plan}
+      </plan>
+      Files created earlier in this run:
+      {created_files}
+      Write the new file {filename}. It does not exist yet. {tool_guidance}
+      {create_format}
+      Never claim a file was created. Do not run tests.
+      {feedback}
+    expected_output: >-
+      The complete new file in one python code block (or a confirmed create tool result). No narrative.
 
   # {filename}     required. The one file this task may change.
   # {file_content} required. The current file, or a note that it is too large to show.
   # {edit_format}  required. How to write edits so the host can apply them.
   # {feedback}     required. Empty on the first attempt; the validation error on a retry.
+  #                After failing tests, the pytest output of a repair round.
   # {plan}         The select stage's answer, shortened.
+  # {created_files} Files created earlier in this run, so imports and names match.
   edit:
     agent: developer
     tool_guidance:
@@ -57,6 +99,8 @@ tasks:
       <plan>
       {plan}
       </plan>
+      Files created earlier in this run:
+      {created_files}
       Edit ONLY {filename}. {tool_guidance}
       {file_content}
       {edit_format}
@@ -67,7 +111,7 @@ tasks:
 
   # {outcome} required. One host-verified line per file.
   # {diff}    required. What was actually written, as a unified diff.
-  # {tests}   The pytest result, or a note that tests were not run.
+  # {tests}   The pytest results before and after the edits, or a note that tests were not run.
   # This stage always runs without tools: everything it needs is in the task.
   explain:
     agent: explainer
