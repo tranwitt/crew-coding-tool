@@ -41,7 +41,28 @@ Optional per model (`REASONING_` or `CODING_` prefix):
 - `*_LLM_TEMPERATURE`: sampling temperature. A low value (for example `0.1`)
   helps models copy code exactly. Leave unset for models that reject it.
 
+- `*_LLM_REASONING_EFFORT`: reasoning effort for models that support it (for
+  example `low`, `medium`, `high`).
+
 No token or output limit is imposed by this tool.
+
+### Chat Completions or Responses API
+
+OpenAI serves models through two APIs, and some newer models are only available
+on the Responses API. `REASONING_LLM_API` and `CODING_LLM_API` choose per model:
+
+| Value | Behaviour |
+| --- | --- |
+| `auto` (default) | Each OpenAI model gets one minimal request per run on Chat Completions. If OpenAI answers that the model is not served there, the run uses the Responses API. Any other failure keeps Chat Completions and is reported by the run itself. |
+| `completions` | Always Chat Completions; no check. |
+| `responses` | Always the Responses API; no check. |
+
+Only models that CrewAI routes to its OpenAI provider (`openai/...` or no
+prefix) are checked or switched; every other provider uses Chat Completions. The
+API in use is printed at start-up and recorded in the log header.
+
+`*_LLM_STORE=false` asks OpenAI not to store the responses (Responses API only;
+unset leaves OpenAI's default, which stores them).
 
 ## Run types
 

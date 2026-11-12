@@ -7,7 +7,7 @@ from unittest import mock
 
 from config import Config
 from crew_setup import build_agents, resolve_tool_modes
-from models import load_model_settings
+from models import build_llms, load_model_settings
 from repo_context import files_matching_request, files_named_in, list_python_files
 
 
@@ -62,6 +62,68 @@ class ModelSettingsTests(unittest.TestCase):
                              ({'LLM_API_KEY': 'k', 'CODING_LLM_CONTEXT_WINDOW': '-5'}, 'CONTEXT_WINDOW'),
                              ({'LLM_API_KEY': 'k', 'REASONING_LLM_EXTRA_BODY': '[1]'}, 'JSON object')):
             with mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(ValueError, message):
+                    load_model_settings()
+
+
+class FakeLLM:
+    """Stands in for crewai.LLM: gpt-next-pro is only served by the Responses API."""
+    created = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        FakeLLM.created.append(kwargs)
+
+    def call(self, messages):
+        if self.kwargs['model'] == 'openai/broken':
+            raise RuntimeError('401 invalid api key')
+        if 'next-pro' in self.kwargs['model'] and self.kwargs.get('api') != 'responses':
+            raise RuntimeError('Error code: 404 - This model is only supported in v1/responses '
+                               'and not in v1/chat/completions.')
+        return 'OK'
+
+
+class ApiSelectionTests(unittest.TestCase):
+    def build(self, **env):
+        FakeLLM.created = []
+        with mock.patch.dict(os.environ, {'LLM_API_KEY': 'k', **env}, clear=True):
+            settings = load_model_settings()
+        return settings, build_llms(settings, FakeLLM)
+
+    def test_auto_switches_only_a_model_that_chat_completions_rejects(self):
+        settings, llms = self.build(CODING_LLM_MODEL='openai/gpt-next-pro', REASONING_LLM_MODEL='openai/gpt-5.1')
+        self.assertEqual(llms['coding'].kwargs['api'], 'responses')
+        self.assertNotIn('api', llms['reasoning'].kwargs)
+        self.assertEqual((settings['coding']['api_used'], settings['reasoning']['api_used']),
+                         ('responses', 'completions'))
+        self.assertIn('v1/responses', settings['coding']['api_note'])
+
+    def test_a_shared_model_is_checked_once(self):
+        _, llms = self.build(LLM_MODEL='openai/gpt-next-pro')
+        self.assertEqual(len(FakeLLM.created), 3)  # one check, then one LLM per role
+        self.assertEqual({llm.kwargs['api'] for llm in llms.values()}, {'responses'})
+
+    def test_explicit_setting_skips_the_check_and_passes_options(self):
+        settings, llms = self.build(CODING_LLM_MODEL='openai/gpt-5.1', CODING_LLM_API='responses',
+                                    CODING_LLM_STORE='false', CODING_LLM_REASONING_EFFORT='low',
+                                    REASONING_LLM_API='completions', REASONING_LLM_STORE='true')
+        self.assertEqual(len(FakeLLM.created), 2)
+        self.assertEqual(llms['coding'].kwargs, {'model': 'openai/gpt-5.1', 'api_key': 'k', 'api': 'responses',
+                                                 'store': False, 'reasoning_effort': 'low'})
+        self.assertEqual(llms['reasoning'].kwargs, {'model': 'openai/gpt-4o', 'api_key': 'k'})
+
+    def test_other_failures_and_other_providers_stay_on_chat_completions(self):
+        settings, llms = self.build(CODING_LLM_MODEL='openai/broken',
+                                    REASONING_LLM_MODEL='nvidia_nim/nemotron')
+        self.assertEqual(settings['coding']['api_used'], 'completions')
+        self.assertIn('check failed', settings['coding']['api_note'])
+        self.assertEqual(len(FakeLLM.created), 3)  # the non-OpenAI model is never pinged
+        self.assertNotIn('api', llms['reasoning'].kwargs)
+
+    def test_invalid_api_settings_are_named(self):
+        for env, message in (({'CODING_LLM_API': 'chat'}, 'CODING_LLM_API must be one of'),
+                             ({'REASONING_LLM_STORE': 'maybe'}, 'REASONING_LLM_STORE')):
+            with mock.patch.dict(os.environ, {'LLM_API_KEY': 'k', **env}, clear=True):
                 with self.assertRaisesRegex(ValueError, message):
                     load_model_settings()
 

@@ -9,7 +9,7 @@ import yaml
 from dotenv import load_dotenv
 
 from config import Config
-from models import ROLES, check_models, create_llm, load_model_settings
+from models import build_llms, check_models, load_model_settings
 from run_log import append_section, capture_run
 from undo import ACTIVE_RUN, get_runs, undo_run
 
@@ -48,6 +48,12 @@ MODEL CONFIGURATION (.env)
     Used by the developer agent.
   LLM_* variables are accepted as legacy fallbacks.
   --model overrides the coding model name only.
+  REASONING_LLM_API, CODING_LLM_API: auto (default), completions, or responses.
+    OpenAI's newer models may only be served by the Responses API. auto makes
+    one minimal request per OpenAI model to check Chat Completions and switches
+    to the Responses API if the model is not served there. Set completions or
+    responses to skip the check.
+  *_LLM_REASONING_EFFORT, *_LLM_STORE: optional; see README.
 
 MODEL INDEPENDENCE
   Nothing depends on the model calling tools. The host lists the repository,
@@ -241,7 +247,9 @@ def main():
     from pipeline import CrewRunner, run_analysis_pipeline, run_edit_pipeline
     from task_config import load_tasks, require_stages
 
-    llms = {role: create_llm(settings[role], LLM) for role in ROLES}
+    llms = build_llms(settings, LLM)
+    for role, config in settings.items():
+        print(f'{role} model: {config["model"]} via {config["api_used"]} API ({config["api_note"]})')
     probe = make_probe(llms, settings, Agent=Agent, Task=Task, Crew=Crew, Process=Process, tool=crew_tool)
     if args.check_models:
         raise SystemExit(0 if check_models(llms, probe) else 1)
@@ -323,6 +331,8 @@ def main():
             'Run type': 'analysis' if args.analyze else 'edit',
             'Coding model': settings['coding']['model'],
             'Reasoning model': settings['reasoning']['model'],
+            'Coding API': settings['coding']['api_used'],
+            'Reasoning API': settings['reasoning']['api_used'],
             'Pytest enabled': args.allow_tests,
             'Tool mode': args.tool_mode,
             'Agents config': agents_path,

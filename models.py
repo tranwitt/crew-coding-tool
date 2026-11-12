@@ -1,9 +1,21 @@
-"""Model configuration from the environment: one coding and one reasoning model."""
+"""Model configuration from the environment: one coding and one reasoning model.
+
+OpenAI serves models through two APIs: Chat Completions and the newer Responses
+API, and some newer models are only available on the latter. ``*_LLM_API``
+selects one; the default ``auto`` checks once per run whether Chat Completions
+accepts the model and switches to the Responses API when it does not.
+"""
 import json
 import os
+import re
 import sys
 
 ROLES = ('coding', 'reasoning')
+APIS = ('auto', 'completions', 'responses')
+
+# What OpenAI answers when a model is not served by Chat Completions.
+_NEEDS_RESPONSES = re.compile(
+    r'v1/responses|responses api|not supported in the v1/chat/completions|not a chat model', re.I)
 
 
 def _settings(prefix, override=None):
@@ -33,6 +45,14 @@ def _settings(prefix, override=None):
             temperature = float(env('TEMPERATURE'))
         except ValueError:
             raise ValueError(f'{prefix}_LLM_TEMPERATURE must be a number') from None
+    api = (env('API') or os.getenv('LLM_API') or 'auto').strip().lower()
+    if api not in APIS:
+        raise ValueError(f'{prefix}_LLM_API must be one of: {", ".join(APIS)}')
+    store = None
+    if env('STORE'):
+        if env('STORE').lower() not in ('true', 'false'):
+            raise ValueError(f'{prefix}_LLM_STORE must be true or false')
+        store = env('STORE').lower() == 'true'
     api_key = env('API_KEY') or (os.getenv('LLM_API_KEY') or os.getenv('OPENAI_API_KEY') or '').strip()
     if not api_key:
         raise ValueError(f'Missing {prefix.lower()} API key: set {prefix}_LLM_API_KEY in .env')
@@ -43,6 +63,9 @@ def _settings(prefix, override=None):
         'context_window': context_window,
         'extra_body': extra_body,
         'temperature': temperature,
+        'api': api,
+        'reasoning_effort': env('REASONING_EFFORT') or None,
+        'store': store,
     }
 
 
@@ -51,9 +74,24 @@ def load_model_settings(coding_override=None):
     return {'coding': _settings('CODING', coding_override), 'reasoning': _settings('REASONING')}
 
 
-def create_llm(settings, LLM):
-    """Build a CrewAI LLM. No token or output limits are imposed here."""
+def is_openai_model(settings):
+    """CrewAI routes ``openai/...`` and unprefixed model names to its OpenAI provider."""
+    return settings['model'].split('/')[0] == 'openai' or '/' not in settings['model']
+
+
+def create_llm(settings, LLM, api=None):
+    """Build a CrewAI LLM. No token or output limits are imposed here.
+
+    ``api`` overrides ``settings['api']``; only 'responses' changes the request,
+    because Chat Completions is CrewAI's default.
+    """
     kwargs = {'model': settings['model'], 'api_key': settings['api_key']}
+    if (api or settings['api']) == 'responses':
+        kwargs['api'] = 'responses'
+        if settings['store'] is not None:
+            kwargs['store'] = settings['store']
+    if settings['reasoning_effort']:
+        kwargs['reasoning_effort'] = settings['reasoning_effort']
     if settings['base_url']:
         kwargs['base_url'] = settings['base_url']
     if settings['context_window'] is not None:
@@ -63,6 +101,43 @@ def create_llm(settings, LLM):
     if settings['temperature'] is not None:
         kwargs['temperature'] = settings['temperature']
     return LLM(**kwargs)
+
+
+def _ping(llm):
+    llm.call([{'role': 'user', 'content': 'Reply with exactly: OK'}])
+
+
+def build_llms(settings, LLM):
+    """Create one LLM per role and record the API each uses in ``settings[role]['api_used']``.
+
+    With ``api: auto`` an OpenAI model gets one minimal request on Chat
+    Completions. Only an answer saying the model is not served there switches it
+    to the Responses API; any other failure is left for the run to report.
+    Roles sharing a model and endpoint are checked once.
+    """
+    llms, resolved = {}, {}
+    for role in ROLES:
+        config = settings[role]
+        key = (config['model'], config['base_url'], config['api'])
+        if key not in resolved:
+            api, note = config['api'], 'configured'
+            if api == 'auto':
+                api, note = 'completions', 'default'
+                if is_openai_model(config):
+                    try:
+                        _ping(create_llm(config, LLM, 'completions'))
+                        note = 'auto: Chat Completions accepted the model'
+                    except Exception as exc:
+                        if _NEEDS_RESPONSES.search(str(exc)):
+                            api = 'responses'
+                            note = f'auto: Chat Completions does not serve this model ({str(exc)[:160]})'
+                        else:
+                            note = f'auto: check failed, keeping Chat Completions ({type(exc).__name__})'
+            resolved[key] = (api, note)
+        api, note = resolved[key]
+        config['api_used'], config['api_note'] = api, note
+        llms[role] = create_llm(config, LLM, api)
+    return llms
 
 
 def check_models(llms, probe):
