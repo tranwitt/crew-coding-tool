@@ -259,14 +259,16 @@ def edit_file(runner, tasks, cfg, request, filename, plan_context, created=(), *
             attempts.append({'attempt': number, 'mode': mode, 'result': 'failed', 'error': errors[-1]})
             print(f'CREWAI VALIDATION FAILURE {filename}: {errors[-1]}', flush=True)
             break
-        content = (f'Current content of {filename}:\n<current_file>\n{source}\n</current_file>'
+        empty = not source.strip()
+        content = (f'{filename} exists but is currently empty.' if empty else
+                   f'Current content of {filename}:\n<current_file>\n{source}\n</current_file>'
                    if inline else
                    f'{filename} is too large to show here; read it with read_project_file.')
         description = stage.render(
             mode, repo=cfg.root, request=request, filename=filename, file_content=content,
             plan=plan_context or '(no plan available)',
             created_files=_created_context(cfg, [f for f in created if f != filename]),
-            edit_format=format_instructions(filename), feedback=feedback)
+            edit_format=format_instructions(filename, empty=empty), feedback=feedback)
         before = len(edits_in_run())
         print(f'CREWAI STAGE: edit {filename} attempt {number}/{len(modes)} ({mode}) via Crew.kickoff()', flush=True)
         raw, error = runner.ask(stage.agent, mode, description, stage.expected_output)

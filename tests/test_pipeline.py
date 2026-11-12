@@ -232,6 +232,54 @@ class FlowTests(PipelineCase):
         self.assertIn('+    return "Hello, " + name + "!"', seen[0])
         self.assertIn('- app.py: changed', seen[0])
 
+    # ---- empty files (a real run failed on a 0-byte hello_world.py)
+
+    HELLO = 'def main() -> None:\n    print("hello world")\n\n\nif __name__ == "__main__":\n    main()\n'
+
+    def fill_empty_file(self, answer, initial=''):
+        empty = self.cfg.root / 'hello_world.py'
+        empty.write_text(initial)
+
+        def model(task):
+            if task.agent.name == 'planner':
+                return 'FILE: hello_world.py - add the printout'
+            self.assertIn('hello_world.py exists but is currently empty', task.description)
+            self.assertIn('complete content of the file', task.description)
+            self.assertNotIn('<<<<<<< SEARCH', task.description)
+            return answer
+
+        status, calls = self.run_flow(model, {'planner': 'text', 'developer': 'text'},
+                                      request='Add a printout for hello world')
+        return empty, status, calls
+
+    def test_empty_file_is_filled_from_a_code_block_and_undone(self):
+        empty, status, calls = self.fill_empty_file('```python\n' + self.HELLO.rstrip() + '\n```')
+        self.assertEqual(status['completed_files'], ['hello_world.py'])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(empty.read_text(), self.HELLO)
+        undo_run(self.cfg, 'testrun')
+        self.assertEqual(empty.read_text(), '')
+
+    def test_empty_file_accepts_a_block_with_an_empty_search(self):
+        block = 'hello_world.py\n<<<<<<< SEARCH\n=======\n' + self.HELLO + '>>>>>>> REPLACE'
+        empty, status, _ = self.fill_empty_file(block)
+        self.assertEqual(status['completed_files'], ['hello_world.py'])
+        self.assertEqual(empty.read_text(), self.HELLO)
+
+    def test_blank_file_accepts_a_json_patch_with_empty_old_text(self):
+        patches = '{"patches":[{"filename":"hello_world.py","old_text":"","new_text":"X = 1\\n"}]}'
+        empty, status, _ = self.fill_empty_file(patches, initial='\n')
+        self.assertEqual(status['completed_files'], ['hello_world.py'])
+        self.assertEqual(empty.read_text(), 'X = 1\n')
+
+    def test_patch_tool_fills_an_empty_file_but_still_needs_old_text_otherwise(self):
+        (self.cfg.root / 'hello_world.py').write_text('')
+        patch = self.tools['patch_project_file']
+        self.assertIn('"status": "updated"', patch.run(filename='hello_world.py', old_text='', new_text='X = 1\n'))
+        self.assertEqual(patch.run(filename='app.py', old_text='', new_text='X = 1\n'),
+                         'ERROR: old_text must not be empty')
+        self.assertEqual(self.app.read_text(), APP)
+
     # ---- new files
 
     NEW_FILE = 'def polite(name):\n    return "Dear " + name\n'

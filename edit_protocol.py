@@ -39,8 +39,20 @@ class Edit:
     kind: str  # 'search_replace', 'json' or 'whole_file'
 
 
-def format_instructions(filename: str) -> str:
-    """Prompt text describing the answer format; contains no tool requirements."""
+def format_instructions(filename: str, empty: bool = False) -> str:
+    """Prompt text describing the answer format; contains no tool requirements.
+
+    An empty file has no line to anchor a SEARCH block on, so the model is asked
+    for the complete content instead.
+    """
+    if empty:
+        return (
+            f'{filename} is empty, so there is nothing to search for. Reply with the '
+            'complete content of the file in exactly one ```python code block. Write out '
+            'every line: no placeholders such as "..." or "rest of the code". Text outside '
+            'the code block is ignored.\n'
+            f'- If this file needs no change, reply with exactly {NO_CHANGE_SENTINEL}.'
+        )
     return (
         'Reply with your edits as SEARCH/REPLACE blocks in exactly this form, '
         'one block per change:\n\n'
@@ -128,6 +140,11 @@ def _parse_search_replace(raw: str, filename: str, source: str):
             raise EditError(f'Block {number} has no >>>>>>> REPLACE line')
         old = '\n'.join(lines[i + 1:divider])
         new = '\n'.join(lines[divider + 1:end])
+        if not old.strip() and not source.strip() and new.strip():
+            # Nothing to anchor on in an empty file: the block is the whole content.
+            edits.append(Edit(source, new.rstrip('\n') + '\n', 'whole_file'))
+            i = end + 1
+            continue
         if not old.strip():
             raise EditError(
                 f'Block {number} has an empty SEARCH section; copy an existing '
@@ -155,7 +172,7 @@ def _json_candidates(raw: str):
         position = raw.find('{', position + length)
 
 
-def _parse_json(raw: str, filename: str):
+def _parse_json(raw: str, filename: str, source: str = 'x'):
     if '"patches"' not in raw and '"edits"' not in raw:
         return []
     for value in _json_candidates(raw):
@@ -175,6 +192,9 @@ def _parse_json(raw: str, filename: str):
             named = item.get('filename', item.get('file'))
             if named is not None and not (isinstance(named, str) and _same_file(named, filename)):
                 raise EditError(f'patches[{index}] targets {named!r}; only {filename!r} may be edited in this task')
+            if old == '' and not source.strip() and isinstance(new, str) and new.strip():
+                edits.append(Edit(source, new.rstrip('\n') + '\n', 'whole_file'))
+                continue
             if not isinstance(old, str) or not old:
                 raise EditError(f'patches[{index}].old_text must be a nonempty string')
             if not isinstance(new, str) or new == old:
@@ -223,7 +243,7 @@ def _parse_whole_file(raw: str, filename: str, source: str):
     _check_elision(body, source, 'The code block')
     if '\r\n' in source:
         body = body.replace('\n', '\r\n')
-    if source.endswith('\n'):
+    if source.endswith('\n') or not source:
         body = body.rstrip('\r\n') + ('\r\n' if '\r\n' in source else '\n')
     if body == source:
         return 'unchanged'
@@ -236,7 +256,7 @@ def parse_edits(raw, filename: str, source: str):
     Raises EditError with a message suitable for feeding back to the model.
     """
     raw = str(raw or '')
-    edits = _parse_search_replace(raw, filename, source) or _parse_json(raw, filename)
+    edits = _parse_search_replace(raw, filename, source) or _parse_json(raw, filename, source)
     if edits:
         return edits, False
     whole = _parse_whole_file(raw, filename, source)

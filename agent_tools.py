@@ -57,20 +57,24 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
 
     @tool('patch_project_file')
     def patch_project_file(filename: str, old_text: str, new_text: str) -> str:
-        """Replace one unique exact fragment in an existing Python file; syntax-check, back up, and write atomically."""
+        """Replace one unique exact fragment in an existing Python file; syntax-check, back up, and write atomically. For an empty file, pass an empty old_text and the full content as new_text."""
         try:
             emit('patch_attempt', file=filename)
             path = cfg.file(filename, for_edit=True)
-            if not old_text:
-                return 'ERROR: old_text must not be empty'
             original_bytes = path.read_bytes()
             if len(original_bytes) > 300_000:
                 return 'ERROR: File too large'
             original = original_bytes.decode('utf-8')
-            count = original.count(old_text)
-            if count != 1:
-                return f'ERROR: Expected exactly one match; found {count}'
-            revised = original.replace(old_text, new_text, 1)
+            if not original.strip() and not old_text.strip():
+                # An empty file has nothing to match: the new text becomes its content.
+                revised = new_text
+            elif not old_text:
+                return 'ERROR: old_text must not be empty'
+            else:
+                count = original.count(old_text)
+                if count != 1:
+                    return f'ERROR: Expected exactly one match; found {count}'
+                revised = original.replace(old_text, new_text, 1)
             if revised == original:
                 emit('patch_no_change', file=filename)
                 return 'ERROR: Patch would not change the file'
@@ -159,10 +163,13 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
             emit('preview_attempt', file=filename)
             path = cfg.file(filename, for_edit=True)
             original = path.read_text(encoding='utf-8')
-            count = original.count(old_text) if old_text else 0
-            if count != 1:
-                return f'ERROR: Expected one nonempty match; found {count}'
-            revised = original.replace(old_text, new_text, 1)
+            if not original.strip() and not old_text.strip():
+                revised = new_text
+            else:
+                count = original.count(old_text) if old_text else 0
+                if count != 1:
+                    return f'ERROR: Expected one nonempty match; found {count}'
+                revised = original.replace(old_text, new_text, 1)
             if path.suffix.lower() == ".py":
                 ast.parse(revised, filename=str(path))
             return ''.join(difflib.unified_diff(original.splitlines(True), revised.splitlines(True), fromfile=filename, tofile=filename+' (proposed)'))[:16000]
