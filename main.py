@@ -76,6 +76,7 @@ OPTIONS
   --log-dir PATH      Override logs/ beside this standalone agent.
   --env-file PATH     Override .env beside main.py.
   --agents-config     Override config/agents.yaml.
+  --tasks-config      Override config/tasks.yaml (stage prompts).
   --model NAME        Override coding model only.
   -h, --help          Brief CLI usage and examples.
   --help-guide        This detailed explanation; no repo needed.
@@ -83,7 +84,7 @@ OPTIONS
 FILES AND SAFETY
   logs/       Timestamped plain-text .log execution logs.
   backups/    Original file snapshots and undo metadata.
-  config/     YAML definitions for planner, developer, and explainer.
+  config/     agents.yaml (the agents) and tasks.yaml (the prompt of each stage).
   Undo refuses unsafe overwrites when a file has changed since its run.
   Tests may execute project code: enable only for trusted repositories.
   Logs and backups may contain sensitive source code; protect both folders.
@@ -122,6 +123,7 @@ def build_parser():
         help='Largest file (in characters) embedded in a task; lower it for small context windows')
     add('--log-dir', help='Plain-text .log directory (default: logs/ beside main.py)')
     add('--agents-config', help='Agents YAML path (default: config/agents.yaml)')
+    add('--tasks-config', help='Stage prompts YAML path (default: config/tasks.yaml)')
     add('--env-file', help='Path to .env file (defaults to .env beside main.py)')
     return parser
 
@@ -224,6 +226,7 @@ def main():
     from agent_tools import make_tools
     from crew_setup import build_agents, load_agent_specs, make_probe, resolve_tool_modes
     from pipeline import CrewRunner, run_analysis_pipeline, run_edit_pipeline
+    from task_config import load_tasks, require_stages
 
     llms = {role: create_llm(settings[role], LLM) for role in ROLES}
     probe = make_probe(llms, settings, Agent=Agent, Task=Task, Crew=Crew, Process=Process, tool=crew_tool)
@@ -247,21 +250,27 @@ def main():
     tool_lookup = {tool.name: tool for tool in
                    make_tools(cfg, allow_tests=args.allow_tests, on_event=capture_tool_event)}
     agents_path = Path(args.agents_config).expanduser().resolve() if args.agents_config else HERE / 'config' / 'agents.yaml'
+    tasks_path = Path(args.tasks_config).expanduser().resolve() if args.tasks_config else HERE / 'config' / 'tasks.yaml'
     try:
         specs = load_agent_specs(agents_path)
+        tasks = load_tasks(tasks_path, set(specs))
+        require_stages(tasks, ('select', 'analyze') if args.analyze else ('select', 'edit'))
         agents, text_agents = build_agents(
             specs, llms, tool_lookup, Agent,
             variables={'{repo}': str(cfg.root), '{request}': request},
             # An analysis run must not be able to write, whatever the YAML grants.
             withhold=('patch_project_file',) if args.analyze else ())
     except (OSError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
-        parser.error(f'Invalid agents configuration: {exc}')
+        parser.error(f'Invalid YAML configuration: {exc}')
 
     def edits_in_run():
         entry = next((e for e in get_runs(cfg) if e['run_id'] == stamp and not e.get('undone')), None)
         return entry['edits'] if entry else []
 
     status = {}
+    # Only agents whose stage can use tools in this run are probed; explain never does.
+    run_stages = ('select', 'analyze') if args.analyze else ('select', 'edit')
+    stage_agents = list(dict.fromkeys(tasks[name].agent for name in run_stages if name in tasks))
 
     def execute():
         print(f'Project: {cfg.root}\nBackups: {cfg.backup_root}\n'
@@ -269,15 +278,15 @@ def main():
               f'Coding model: {settings["coding"]["model"]}\nReasoning model: {settings["reasoning"]["model"]}\n'
               f'Pytest enabled: {args.allow_tests}\n')
         runner = CrewRunner(agents=agents, text_agents=text_agents,
-                            tool_modes=resolve_tool_modes(specs, args.tool_mode, probe),
+                            tool_modes=resolve_tool_modes(specs, stage_agents, args.tool_mode, probe),
                             Crew=Crew, Task=Task, Process=Process)
         if args.analyze:
             status.update(run_analysis_pipeline(
-                cfg=cfg, request=request, runner=runner, max_files=args.max_edit_files,
+                cfg=cfg, request=request, runner=runner, tasks=tasks, max_files=args.max_edit_files,
                 max_inline_chars=args.max_inline_chars))
         else:
             status.update(run_edit_pipeline(
-                cfg=cfg, request=request, runner=runner,
+                cfg=cfg, request=request, runner=runner, tasks=tasks,
                 patch_tool=tool_lookup['patch_project_file'], pytest_tool=tool_lookup['run_pytest'],
                 edits_in_run=edits_in_run, max_files=args.max_edit_files,
                 allow_tests=args.allow_tests, max_inline_chars=args.max_inline_chars,
@@ -303,6 +312,7 @@ def main():
             'Pytest enabled': args.allow_tests,
             'Tool mode': args.tool_mode,
             'Agents config': agents_path,
+            'Tasks config': tasks_path,
         }, execute)
     finally:
         ACTIVE_RUN.reset(token)

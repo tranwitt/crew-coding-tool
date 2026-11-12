@@ -27,7 +27,11 @@ except ImportError:  # Minimal stand-in exposing the tool decorator API used her
 from agent_tools import make_tools
 from config import Config
 from pipeline import CrewRunner, run_analysis_pipeline, run_edit_pipeline
+from task_config import load_tasks
 from undo import ACTIVE_RUN, get_runs, undo_run
+
+TASKS = load_tasks(Path(__file__).resolve().parent.parent / 'config' / 'tasks.yaml',
+                   {'planner', 'developer', 'explainer'})
 
 APP = (
     'def greet(name):\n'
@@ -90,10 +94,10 @@ class FlowTests(unittest.TestCase):
                           Crew=crew_for(model, calls), Task=FakeTask,
                           Process=types.SimpleNamespace(sequential=1))
 
-    def run_flow(self, model, tool_modes, request='Make the greeting friendlier', explain=False):
+    def run_flow(self, model, tool_modes, request='Make the greeting friendlier', explain=False, tasks=TASKS):
         calls = []
         status = run_edit_pipeline(
-            cfg=self.cfg, request=request, runner=self.runner(model, tool_modes, calls),
+            cfg=self.cfg, request=request, runner=self.runner(model, tool_modes, calls), tasks=tasks,
             patch_tool=self.tools['patch_project_file'], edits_in_run=self.edits,
             max_files=6, explain=explain)
         return status, calls
@@ -234,12 +238,34 @@ class FlowTests(unittest.TestCase):
 
         calls = []
         status = run_analysis_pipeline(
-            cfg=self.cfg, request='How does greet work?', max_files=6,
+            cfg=self.cfg, request='How does greet work?', max_files=6, tasks=TASKS,
             runner=self.runner(model, {'planner': 'text', 'explainer': 'text'}, calls))
         self.assertEqual(status['report'], 'greet() concatenates "Hello " and the name.')
         self.assertIsNone(status['error'])
         self.assertEqual(self.app.read_text(), APP)
         self.assertEqual(self.edits(), [])
+
+    def test_custom_tasks_change_agent_wording_and_stages(self):
+        import yaml
+        data = yaml.safe_load((Path(__file__).resolve().parent.parent / 'config' / 'tasks.yaml').read_text())
+        data['tasks']['select']['agent'] = 'explainer'
+        data['tasks']['edit']['description'] = 'HOUSE STYLE: tabs are forbidden.\n' + data['tasks']['edit']['description']
+        del data['tasks']['explain']
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'tasks.yaml').write_text(yaml.safe_dump(data))
+            tasks = load_tasks(Path(tmp) / 'tasks.yaml', {'planner', 'developer', 'explainer'})
+
+        def model(task):
+            if task.agent.name == 'explainer':
+                return 'FILE: app.py'
+            self.assertTrue(task.description.startswith('HOUSE STYLE: tabs are forbidden.'))
+            return BLOCK
+
+        status, calls = self.run_flow(model, {'explainer': 'text', 'developer': 'text'},
+                                      explain=True, tasks=tasks)
+        self.assertEqual([c.agent.name for c in calls], ['explainer', 'developer'])
+        self.assertEqual(status['completed_files'], ['app.py'])
+        self.assertIsNone(status['report'])  # no explain stage configured
 
     def test_analysis_failure_is_reported_without_a_report(self):
         def model(task):
@@ -248,7 +274,7 @@ class FlowTests(unittest.TestCase):
             raise RuntimeError('503 upstream unavailable')
 
         status = run_analysis_pipeline(
-            cfg=self.cfg, request='How does greet work?', max_files=6,
+            cfg=self.cfg, request='How does greet work?', max_files=6, tasks=TASKS,
             runner=self.runner(model, {'planner': 'text', 'explainer': 'tools'}, []))
         self.assertIsNone(status['report'])
         self.assertIn('503', status['error'])

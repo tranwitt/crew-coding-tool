@@ -112,17 +112,37 @@ makes a few small paid requests):
 python main.py --check-models
 ```
 
-## Configure agents
+## Configure agents and prompts
 
-`config/agents.yaml` defines `planner`, `developer` and `explainer`: role, goal,
-backstory, model (`reasoning` or `coding`), tools and `max_iter`. Use another
-file with `--agents-config`. `{repo}` and `{request}` are replaced in agent text.
+`config/agents.yaml` defines the agents: role, goal, backstory, model
+(`reasoning` or `coding`), tools and `max_iter`. Use another file with
+`--agents-config`. `{repo}` and `{request}` are replaced in agent text.
 
 - Tool names: `list_project_files`, `read_project_file`, `preview_project_patch`,
   `patch_project_file`, `run_pytest` (the last needs `--allow-tests`).
 - `use_system_prompt: false` is available for models that reject the system role.
 
-The task prompts of each stage live in `pipeline.py`.
+`config/tasks.yaml` defines the stages: which agent runs each one and the prompt
+it receives. Use another file with `--tasks-config`.
+
+| Stage | Runs in | Default agent |
+| --- | --- | --- |
+| `select` | every run | planner |
+| `edit` | edit runs | developer |
+| `explain` | edit runs; remove the stage to skip it | explainer |
+| `analyze` | `--analyze` runs | explainer |
+
+Each stage has `agent`, `description` and `expected_output`. The host fills
+`{placeholders}` in the description, such as `{request}`, `{listing}` or
+`{file_content}`; the comments in `tasks.yaml` list them per stage. Stages with
+`tool_guidance` have a `tools` and a `text` wording, and `{tool_guidance}`
+becomes the one matching how the agent runs.
+
+To add house rules, edit the wording of a description. To give a stage to a
+different agent, define the agent in `agents.yaml` and name it under `agent`.
+The set of stages is fixed. A configuration that drops a placeholder the
+pipeline depends on (for example `{edit_format}`), misspells one, or names an
+undefined agent is rejected before any model is called.
 
 ## Scope and safety
 
@@ -166,10 +186,11 @@ printed after each edit run.
 | File | Purpose |
 | --- | --- |
 | `main.py` | Command line, run setup, final report and exit code |
-| `pipeline.py` | The stages and the two run types |
+| `pipeline.py` | Runs the stages for the two run types |
 | `edit_protocol.py` | Parse text answers into exact, unambiguous edits |
 | `repo_context.py` | File listing, file selection, run diffs |
 | `crew_setup.py` | Build agents from YAML; decide tool modes |
+| `task_config.py` | Load and validate the stage prompts in `tasks.yaml` |
 | `tool_probe.py` | Check whether a model really calls CrewAI tools |
 | `models.py` | Model settings from `.env`; `--check-models` |
 | `agent_tools.py` | Read, preview, patch and pytest tools |

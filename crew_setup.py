@@ -3,8 +3,6 @@ import yaml
 
 from tool_probe import probe_tool_calling
 
-PIPELINE_AGENTS = ('planner', 'developer', 'explainer')
-
 TEXT_MODE_NOTE = (
     ' In this run you have no tools. The host application gives you the repository '
     'listing and file contents, and applies the edits you return in the requested '
@@ -86,13 +84,11 @@ def make_probe(llms, settings, *, Agent, Task, Crew, Process, tool):
     return probe
 
 
-def resolve_tool_modes(specs, choice, probe):
-    """Map each pipeline agent to 'tools' or 'text' for this run."""
+def resolve_tool_modes(specs, names, choice, probe):
+    """Map each agent in ``names`` (those the stages use) to 'tools' or 'text'."""
     modes = {}
-    for name in PIPELINE_AGENTS:
-        spec = specs.get(name)
-        if spec is None:
-            continue
+    for name in names:
+        spec = specs[name]
         if choice != 'auto':
             modes[name], why = choice, f'--tool-mode {choice}'
         elif not spec.get('tools'):

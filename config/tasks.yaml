@@ -1,0 +1,113 @@
+# Prompts for the pipeline stages. Each stage names the agent (from agents.yaml)
+# that runs it. Edit the wording freely; the host fills in the {placeholders}.
+#
+#   select   choose the files a run works on          (every run)
+#   edit     change one file                          (edit runs)
+#   explain  describe what an edit run did            (edit runs; remove the stage to skip it)
+#   analyze  answer the request without editing       (--analyze runs)
+#
+# Placeholders available in every stage: {repo}, {request}.
+# {tool_guidance} becomes the stage's tool_guidance.tools or tool_guidance.text
+# line, depending on whether the agent has working tools in this run.
+# The other placeholders are listed above each stage. A placeholder marked
+# "required" must stay in the description; unknown placeholders are rejected.
+tasks:
+  # {listing}    required. Python files with their top-level definitions.
+  # {file_scope} "editable Python files" (edit run) or "Python files" (analysis run).
+  # {purpose}    "must be edited" or "must be read to answer the request".
+  # The host reads the files from "FILE: path" lines in the answer.
+  select:
+    agent: planner
+    tool_guidance:
+      tools: You may use your read-only tools to inspect files before answering.
+      text: "You have no tools in this task and need none: do not attempt tool calls."
+    description: |-
+      Repository: {repo}
+      Request: {request}
+      {tool_guidance}
+      The host application listed the {file_scope} (with their top-level definitions) for you:
+      <files>
+      {listing}
+      </files>
+      Decide which of these existing files {purpose}. Answer with one line per file, most important first, in exactly this form:
+      FILE: path/to/file.py - one sentence saying why
+      Then add essential interface constraints as short bullet points. Use only paths from the list. Limit to 600 words. Do not write code and do not edit.
+    expected_output: "FILE: lines naming existing Python files, then brief constraints."
+
+  # {filename}     required. The one file this task may change.
+  # {file_content} required. The current file, or a note that it is too large to show.
+  # {edit_format}  required. How to write edits so the host can apply them.
+  # {feedback}     required. Empty on the first attempt; the validation error on a retry.
+  # {plan}         The select stage's answer, shortened.
+  edit:
+    agent: developer
+    tool_guidance:
+      tools: >-
+        You may call patch_project_file(filename, old_text, new_text) directly.
+        Unless that tool confirms "status": "updated", your final answer must
+        contain the edits in the format below; the host application applies them.
+      text: >-
+        You have NO tools in this task. Do not attempt tool calls and ignore any
+        instruction to call one: the host application applies the edits you
+        return and verifies them.
+    description: |-
+      Repository: {repo}
+      User request: {request}
+      Plan from the architect (context only; other files are handled separately):
+      <plan>
+      {plan}
+      </plan>
+      Edit ONLY {filename}. {tool_guidance}
+      {file_content}
+      {edit_format}
+      Never claim a file was modified. Do not run tests.
+      {feedback}
+    expected_output: >-
+      SEARCH/REPLACE blocks for the file (or a confirmed patch tool result). No narrative.
+
+  # {outcome} required. One host-verified line per file.
+  # {diff}    required. What was actually written, as a unified diff.
+  # {tests}   The pytest result, or a note that tests were not run.
+  # This stage always runs without tools: everything it needs is in the task.
+  explain:
+    agent: explainer
+    description: |-
+      Explain the outcome of this coding run to the user.
+      User request: {request}
+      You need no tools: everything below was verified by the host application and is the only evidence. Do not invent edits, files or test results.
+      Outcome per file:
+      {outcome}
+      Diff of what was actually written:
+      <diff>
+      {diff}
+      </diff>
+      Tests: {tests}
+      Say in plain language what changed and why, what was verified, and what is failed, incomplete or unverified. Use exactly these Markdown headings:
+      ## Task overview
+      ## Work completed
+      ## Why these changes were made
+      ## Verification
+      ## Outstanding issues
+    expected_output: A factual Markdown explanation with the specified headings.
+
+  # {listing}       Python files with their top-level definitions.
+  # {file_contents} required. Contents of the selected files.
+  # {omitted}       Selected files that could not be shown, or nothing.
+  analyze:
+    agent: explainer
+    tool_guidance:
+      tools: You may read further files with your read-only tools.
+      text: You have no tools in this task; answer from the material below.
+    description: |-
+      Repository: {repo}
+      Request: {request}
+      This is a read-only analysis: do not edit files and do not propose that you did. {tool_guidance}
+      Python files in the repository:
+      <files>
+      {listing}
+      </files>
+      Contents of the files selected as relevant:
+      {file_contents}
+      {omitted}
+      Answer the request for the user in Markdown. Base every statement on the material you were given or read; say so when something could not be determined.
+    expected_output: A factual Markdown answer to the request.

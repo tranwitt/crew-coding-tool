@@ -8,19 +8,18 @@ the model being able to call tools:
   are parsed by edit_protocol and applied through the journaled patch tool.
 * A stage that fails with tools is repeated without tools.
 
-An edit only counts when it appears in the undo journal.
+Which agent runs a stage, and what it is told, comes from tasks.yaml (see
+task_config). An edit only counts when it appears in the undo journal.
 """
 import json
 from pathlib import Path
 
 from edit_protocol import EditError, format_instructions, parse_edits, resolve_edit
+from task_config import require_stages
 from repo_context import (describe_repository, files_matching_request, files_named_in,
                           list_python_files, run_diffs)
 
 PLAN_CONTEXT_CHARS = 4000
-
-EXPLANATION_HEADINGS = ('## Task overview\n## Work completed\n## Why these changes were made\n'
-                        '## Verification\n## Outstanding issues')
 
 
 def _raw(result):
@@ -54,9 +53,6 @@ class CrewRunner:
         self.Crew, self.Task, self.Process = Crew, Task, Process
         self.usage = {}
 
-    def has(self, name):
-        return name in self.agents
-
     def mode(self, name):
         return 'text' if self.tool_modes.get(name) == 'text' and name in self.text_agents else 'tools'
 
@@ -87,27 +83,19 @@ class CrewRunner:
 # Stage: select files
 # --------------------------------------------------------------------------
 
-def select_files(runner, cfg, request, limit, *, for_edit):
-    """Ask the planner which files matter. Returns (files, plan, source, listing)."""
+def select_files(runner, tasks, cfg, request, limit, *, for_edit):
+    """Ask the select stage which files matter. Returns (files, plan, source, listing)."""
+    stage = tasks['select']
     files = list_python_files(cfg, for_edit=for_edit)
     listing, symbols = describe_repository(cfg, files)
-    purpose = ('must be edited' if for_edit else 'must be read to answer the request')
-    plan, selected, source = '', [], 'planner'
-    for mode in runner.modes_to_try('planner'):
-        tools_line = ('You have no tools in this task and need none: do not attempt tool calls.'
-                      if mode == 'text' else
-                      'You may use your read-only tools to inspect files before answering.')
+    plan, selected, source = '', [], stage.agent
+    for mode in runner.modes_to_try(stage.agent):
         print(f'CREWAI STAGE: select files ({mode}) via Crew.kickoff()', flush=True)
-        plan, error = runner.ask('planner', mode, (
-            f'Repository: {cfg.root}\nRequest: {request}\n{tools_line}\n'
-            f'The host application listed the {"editable " if for_edit else ""}Python files '
-            f'(with their top-level definitions) for you:\n<files>\n{listing}\n</files>\n'
-            f'Decide which of these existing files {purpose}. Answer with one line per '
-            'file, most important first, in exactly this form:\n'
-            'FILE: path/to/file.py - one sentence saying why\n'
-            'Then add essential interface constraints as short bullet points. Use only '
-            'paths from the list. Limit to 600 words. Do not write code and do not edit.'),
-            'FILE: lines naming existing Python files, then brief constraints.')
+        plan, error = runner.ask(stage.agent, mode, stage.render(
+            mode, repo=cfg.root, request=request, listing=listing,
+            file_scope='editable Python files' if for_edit else 'Python files',
+            purpose='must be edited' if for_edit else 'must be read to answer the request'),
+            stage.expected_output)
         if error:
             print(f'CREWAI SELECTION FAILURE ({mode}): {error}', flush=True)
         selected = files_named_in(plan, cfg, limit, for_edit=for_edit)
@@ -117,7 +105,7 @@ def select_files(runner, cfg, request, limit, *, for_edit):
         selected, source = files_named_in(request, cfg, limit, for_edit=for_edit), 'paths named in request'
     if not selected:
         selected = files_matching_request(request, files, symbols, min(limit, 3))
-        source = 'keyword match (planner named no valid file)'
+        source = f'keyword match ({stage.agent} named no valid file)'
     print(f'CREWAI FILE TARGETS ({source}): ' + json.dumps(selected), flush=True)
     return selected, plan, source, listing
 
@@ -153,9 +141,10 @@ def apply_edits(edits, filename, read_source, patch_tool, edits_in_run):
     return applied, present, None
 
 
-def edit_file(runner, cfg, request, filename, plan_context, *, patch_tool, edits_in_run,
+def edit_file(runner, tasks, cfg, request, filename, plan_context, *, patch_tool, edits_in_run,
               max_inline_chars, extra_attempts):
-    """Run developer attempts on one file until an attempt validates. Returns its report."""
+    """Run edit-stage attempts on one file until an attempt validates. Returns its report."""
+    stage = tasks['edit']
     def read_source():
         # Bytes, not text mode: the patch tool matches against undecoded newlines.
         return cfg.file(filename, for_edit=True).read_bytes().decode('utf-8')
@@ -163,7 +152,7 @@ def edit_file(runner, cfg, request, filename, plan_context, *, patch_tool, edits
     file_start = len(edits_in_run())
     errors, attempts = [], []
     feedback = ''
-    modes = runner.modes_to_try('developer')
+    modes = runner.modes_to_try(stage.agent)
     modes += [modes[-1]] * (1 + extra_attempts)
     for number, mode in enumerate(modes, 1):
         try:
@@ -179,28 +168,16 @@ def edit_file(runner, cfg, request, filename, plan_context, *, patch_tool, edits
             attempts.append({'attempt': number, 'mode': mode, 'result': 'failed', 'error': errors[-1]})
             print(f'CREWAI VALIDATION FAILURE {filename}: {errors[-1]}', flush=True)
             break
-        if mode == 'text':
-            how = ('You have NO tools in this task. Do not attempt tool calls and ignore any '
-                   'instruction to call one: the host application applies the edits you '
-                   'return and verifies them.')
-        else:
-            how = ('You may call patch_project_file(filename, old_text, new_text) directly. '
-                   'Unless that tool confirms "status": "updated", your final answer must '
-                   'contain the edits in the format below; the host application applies them.')
-        content = (f'Current content of {filename}:\n<current_file>\n{source}\n</current_file>\n'
+        content = (f'Current content of {filename}:\n<current_file>\n{source}\n</current_file>'
                    if inline else
-                   f'{filename} is too large to show here; read it with read_project_file.\n')
-        description = (
-            f'Repository: {cfg.root}\nUser request: {request}\n'
-            + (f'Plan from the architect (context only; other files are handled separately):\n'
-               f'<plan>\n{plan_context}\n</plan>\n' if plan_context else '')
-            + f'Edit ONLY {filename}. {how}\n{content}'
-            + format_instructions(filename)
-            + '\nNever claim a file was modified. Do not run tests.' + feedback)
+                   f'{filename} is too large to show here; read it with read_project_file.')
+        description = stage.render(
+            mode, repo=cfg.root, request=request, filename=filename, file_content=content,
+            plan=plan_context or '(no plan available)',
+            edit_format=format_instructions(filename), feedback=feedback)
         before = len(edits_in_run())
         print(f'CREWAI STAGE: edit {filename} attempt {number}/{len(modes)} ({mode}) via Crew.kickoff()', flush=True)
-        raw, error = runner.ask('developer', mode, description,
-                                'SEARCH/REPLACE blocks for the file (or a confirmed patch tool result). No narrative.')
+        raw, error = runner.ask(stage.agent, mode, description, stage.expected_output)
         by_tool = len(edits_in_run()) - before
         applied = present = 0
         no_change = False
@@ -216,10 +193,10 @@ def edit_file(runner, cfg, request, filename, plan_context, *, patch_tool, edits
                                                       patch_tool, edits_in_run)
                 print(f'CREWAI TEXT EDITS {filename}: {applied} journaled, '
                       f'{present} already present', flush=True)
-        if mode == 'tools' and not by_tool and runner.mode('developer') == 'tools':
-            runner.use_text('developer')
-            if runner.mode('developer') == 'text':
-                print('CREWAI TOOL MODE: the developer model did not patch through its tools; '
+        if mode == 'tools' and not by_tool and runner.mode(stage.agent) == 'tools':
+            runner.use_text(stage.agent)
+            if runner.mode(stage.agent) == 'text':
+                print(f'CREWAI TOOL MODE: the {stage.agent} model did not patch through its tools; '
                       'remaining edits use the tool-free text protocol.', flush=True)
         attempts.append({'attempt': number, 'mode': mode,
                          'result': 'failed' if error else ('no_change' if no_change else 'journal_verified'),
@@ -229,7 +206,7 @@ def edit_file(runner, cfg, request, filename, plan_context, *, patch_tool, edits
             break
         errors.append(error)
         print(f'CREWAI VALIDATION FAILURE {filename}: {error}', flush=True)
-        feedback = ('\nPREVIOUS ATTEMPT FAILED VALIDATION: ' + error[:700] +
+        feedback = ('PREVIOUS ATTEMPT FAILED VALIDATION: ' + error[:700] +
                     '\nThe file content above is CURRENT'
                     + (f' and already includes {applied} edit(s) from your previous answer'
                        if applied else '') +
@@ -247,9 +224,10 @@ def edit_file(runner, cfg, request, filename, plan_context, *, patch_tool, edits
 # Stage: explain
 # --------------------------------------------------------------------------
 
-def explain_changes(runner, cfg, request, reports, edits, test_status):
-    """Have the explainer describe the run from host-verified evidence. Returns text or None."""
-    if not runner.has('explainer'):
+def explain_changes(runner, tasks, cfg, request, reports, edits, test_status):
+    """Have the explain stage describe the run from host-verified evidence. Returns text or None."""
+    stage = tasks.get('explain')
+    if stage is None:
         return None
     outcome = '\n'.join(
         f'- {r["file"]}: '
@@ -259,17 +237,9 @@ def explain_changes(runner, cfg, request, reports, edits, test_status):
         + (f' (last error: {r["errors"][-1][:300]})' if r['errors'] and not r['complete'] and not r['unchanged'] else '')
         for r in reports) or '- no file was selected'
     print('CREWAI STAGE: explain (text) via Crew.kickoff()', flush=True)
-    raw, error = runner.ask('explainer', 'text', (
-        f'Explain the outcome of this coding run to the user.\nUser request: {request}\n'
-        'You need no tools: everything below was verified by the host application and is '
-        'the only evidence. Do not invent edits, files or test results.\n'
-        f'Outcome per file:\n{outcome}\n'
-        f'Diff of what was actually written:\n<diff>\n{run_diffs(cfg, edits) or "(no changes were written)"}\n</diff>\n'
-        f'Tests: {test_status}\n'
-        'Say in plain language what changed and why, what was verified, and what is '
-        'failed, incomplete or unverified. Use exactly these Markdown headings:\n'
-        + EXPLANATION_HEADINGS),
-        'A factual Markdown explanation with the specified headings.')
+    raw, error = runner.ask(stage.agent, 'text', stage.render(
+        'text', repo=cfg.root, request=request, outcome=outcome, tests=test_status,
+        diff=run_diffs(cfg, edits) or '(no changes were written)'), stage.expected_output)
     if error:
         print(f'CREWAI EXPLANATION FAILURE: {error}', flush=True)
         return None
@@ -280,21 +250,19 @@ def explain_changes(runner, cfg, request, reports, edits, test_status):
 # Pipelines
 # --------------------------------------------------------------------------
 
-def run_edit_pipeline(*, cfg, request, runner, patch_tool, edits_in_run, max_files,
+def run_edit_pipeline(*, cfg, request, runner, tasks, patch_tool, edits_in_run, max_files,
                       pytest_tool=None, allow_tests=False, max_inline_chars=60000,
                       extra_attempts=0, explain=True):
     """Select files, edit each one, run tests if allowed, explain. Returns the status dict."""
-    for name in ('planner', 'developer'):
-        if not runner.has(name):
-            raise ValueError(f'The pipeline requires a {name} agent in agents.yaml')
-    selected, plan, source, _ = select_files(runner, cfg, request, max_files, for_edit=True)
+    require_stages(tasks, ('select', 'edit'))
+    selected, plan, source, _ = select_files(runner, tasks, cfg, request, max_files, for_edit=True)
     status = {'mode': 'edit', 'selected_files': selected, 'selection_source': source,
               'completed_files': [], 'incomplete_files': [], 'unchanged_files': [],
               'reports': [], 'tests': 'not run (--allow-tests disabled)', 'report': None}
     if not selected:
         status['error'] = 'No editable Python file could be identified for the request'
     for filename in selected:
-        report = edit_file(runner, cfg, request, filename, plan.strip()[:PLAN_CONTEXT_CHARS],
+        report = edit_file(runner, tasks, cfg, request, filename, plan.strip()[:PLAN_CONTEXT_CHARS],
                            patch_tool=patch_tool, edits_in_run=edits_in_run,
                            max_inline_chars=max_inline_chars, extra_attempts=extra_attempts)
         status['reports'].append(report)
@@ -311,20 +279,20 @@ def run_edit_pipeline(*, cfg, request, runner, patch_tool, edits_in_run, max_fil
         print('TEST VERIFICATION: ' + status['tests'], flush=True)
 
     if explain and selected:
-        status['report'] = explain_changes(runner, cfg, request, status['reports'],
+        status['report'] = explain_changes(runner, tasks, cfg, request, status['reports'],
                                            edits_in_run(), status['tests'])
     status.update(tool_modes=runner.tool_modes, usage=runner.usage)
     return status
 
 
-def run_analysis_pipeline(*, cfg, request, runner, max_files, max_inline_chars=60000):
+def run_analysis_pipeline(*, cfg, request, runner, tasks, max_files, max_inline_chars=60000):
     """Read-only run: select relevant files, then answer the request about them.
 
     Nothing is written. The run succeeds when ``status['report']`` is nonempty.
     """
-    if not runner.has('planner'):
-        raise ValueError('The pipeline requires a planner agent in agents.yaml')
-    selected, _, source, listing = select_files(runner, cfg, request, max_files, for_edit=False)
+    require_stages(tasks, ('select', 'analyze'))
+    stage = tasks['analyze']
+    selected, _, source, listing = select_files(runner, tasks, cfg, request, max_files, for_edit=False)
     shown, omitted, budget = [], [], max_inline_chars
     for filename in selected:
         try:
@@ -337,22 +305,14 @@ def run_analysis_pipeline(*, cfg, request, runner, max_files, max_inline_chars=6
             continue
         budget -= len(text)
         shown.append(f'<file path="{filename}">\n{text}\n</file>')
-    analyst = 'explainer' if runner.has('explainer') else 'planner'
     report, error = '', None
-    for mode in runner.modes_to_try(analyst):
-        tools_line = ('You have no tools in this task; answer from the material below.'
-                      if mode == 'text' else
-                      'You may read further files with your read-only tools.')
+    for mode in runner.modes_to_try(stage.agent):
         print(f'CREWAI STAGE: analyse ({mode}) via Crew.kickoff()', flush=True)
-        report, error = runner.ask(analyst, mode, (
-            f'Repository: {cfg.root}\nRequest: {request}\n'
-            f'This is a read-only analysis: do not edit files and do not propose that you did. {tools_line}\n'
-            f'Python files in the repository:\n<files>\n{listing}\n</files>\n'
-            + ('Contents of the files selected as relevant:\n' + '\n'.join(shown) + '\n' if shown else '')
-            + (f'Not shown (too large or unreadable): {", ".join(omitted)}\n' if omitted else '')
-            + 'Answer the request for the user in Markdown. Base every statement on the '
-              'material you were given or read; say so when something could not be determined.'),
-            'A factual Markdown answer to the request.')
+        report, error = runner.ask(stage.agent, mode, stage.render(
+            mode, repo=cfg.root, request=request, listing=listing,
+            file_contents='\n'.join(shown) or '(no file was selected)',
+            omitted=f'Not shown (too large or unreadable): {", ".join(omitted)}' if omitted else ''),
+            stage.expected_output)
         if error:
             print(f'CREWAI ANALYSIS FAILURE ({mode}): {error}', flush=True)
         if report.strip():

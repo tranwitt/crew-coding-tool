@@ -81,11 +81,11 @@ class CrewSetupTests(unittest.TestCase):
             probed.append(role)
             return role == 'coding', 'detail'
 
-        modes = resolve_tool_modes(self.SPECS, 'auto', probe)
+        modes = resolve_tool_modes(self.SPECS, list(self.SPECS), 'auto', probe)
         self.assertEqual(modes, {'planner': 'text', 'developer': 'tools', 'explainer': 'text'})
         self.assertEqual(probed, ['reasoning', 'coding'])  # explainer has no tools: no probe
-        forced = resolve_tool_modes(self.SPECS, 'text', lambda role: self.fail('no probe expected'))
-        self.assertEqual(set(forced.values()), {'text'})
+        forced = resolve_tool_modes(self.SPECS, ['developer'], 'text', lambda role: self.fail('no probe expected'))
+        self.assertEqual(forced, {'developer': 'text'})
 
     def test_agents_come_with_and_without_tools(self):
         Agent = lambda **kwargs: kwargs
