@@ -16,6 +16,12 @@ import yaml
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+TEXT_MODE_NOTE = (
+    ' In this run you have no tools. The host application gives you the repository '
+    'listing and file contents, and applies the edits you return in the requested '
+    'text format. Ignore any instruction to call a tool.'
+)
+
 
 def extract_usage(result):
     """Return provider-reported usage from a CrewAI kickoff result, if present."""
@@ -127,6 +133,15 @@ MODEL CONFIGURATION (.env)
   LLM_* variables are accepted as legacy fallbacks.
   --model overrides the coding model name only.
 
+MODEL INDEPENDENCE
+  Edits do not depend on the model calling tools. The host lists the
+  repository, embeds the file being edited in the task, and applies edits the
+  model returns as SEARCH/REPLACE text through the journaled patch tool.
+  --tool-mode auto   Probe each model once; use tools only if they really work.
+  --tool-mode text   Never rely on tool calls (any chat model).
+  --tool-mode tools  Skip the probe; offer tools first, fall back to text.
+  *_LLM_TEMPERATURE  Optional; a low value helps models copy code exactly.
+
 EXAMPLES
   python main.py --repo ~/projects/sample-python-project --message "Explain this code"
   python main.py --repo ~/projects/sample-python-project -m "Fix parser errors" --allow-tests
@@ -145,6 +160,9 @@ OPTIONS
   --agents-config     Override config/agents.yaml.
   --tasks-config      Override config/tasks.yaml.
   --model NAME        Override coding model only.
+  --tool-mode MODE    auto (default), text, or tools; see MODEL INDEPENDENCE.
+  --max-inline-chars  Largest file embedded in an edit task (default 60000).
+  --check-models      Test connectivity and tool calling of both models.
   -h, --help          Brief CLI usage and examples.
   --help-guide        This detailed explanation; no repo needed.
 
@@ -189,7 +207,13 @@ Use --help-guide for setup, model configuration, safety, and all options.
     parser.add_argument('--no-deterministic-fallback', action='store_true', help='Disable model-independent JSON patch fallback when CrewAI makes no edits')
     parser.add_argument('--max-edit-files', type=int, default=6, help='Maximum targeted files handled by focused CrewAI developer tasks')
     parser.add_argument('--legacy-monolithic', action='store_true', help='Use original single CrewAI kickoff for all tasks')
-    parser.add_argument('--edit-retries', type=int, default=0, help='Additional developer-only attempts when no edits were recorded (default: 0; optional)')
+    parser.add_argument('--edit-retries', type=int, default=0, help='Extra tool-free attempts per file after the built-in ones fail validation (default: 0)')
+    parser.add_argument('--tool-mode', choices=('auto', 'tools', 'text'), default='auto',
+                        help='How agents reach the repository. auto (default): probe each model once and use tools only if it '
+                             'really invokes them. text: never rely on tool calls; the host supplies file contents and applies '
+                             'edits returned as text (works with any chat model). tools: skip the probe and offer tools first.')
+    parser.add_argument('--max-inline-chars', type=int, default=60000,
+                        help='Largest file (in characters) embedded in an edit task; lower it for small context windows')
     parser.add_argument('--log-dir', help='Plain-text .log directory (default: logs/ beside main.py)')
     parser.add_argument('--agents-config', help='Agents YAML path (default: config/agents.yaml)')
     parser.add_argument('--tasks-config', help='Tasks YAML path (default: config/tasks.yaml)')
@@ -200,6 +224,10 @@ Use --help-guide for setup, model configuration, safety, and all options.
         parser.error('--max-edit-files must be between 1 and 20')
     if args.edit_retries < 0 or args.edit_retries > 5:
         parser.error('--edit-retries must be between 0 and 5')
+    if args.max_inline_chars < 1000:
+        parser.error('--max-inline-chars must be at least 1000')
+    if args.legacy_monolithic and args.tool_mode == 'text':
+        parser.error('--legacy-monolithic depends on tool calls; it cannot be combined with --tool-mode text')
     if args.help_guide:
         print(HELP_GUIDE)
         return
@@ -245,8 +273,16 @@ Use --help-guide for setup, model configuration, safety, and all options.
                 parser.error(f'{prefix}_LLM_EXTRA_BODY must be valid JSON: {exc}')
             if not isinstance(extra_body, dict):
                 parser.error(f'{prefix}_LLM_EXTRA_BODY must be a JSON object')
+        raw_temperature = (os.getenv(f'{prefix}_LLM_TEMPERATURE') or '').strip()
+        temperature = None
+        if raw_temperature:
+            try:
+                temperature = float(raw_temperature)
+            except ValueError:
+                parser.error(f'{prefix}_LLM_TEMPERATURE must be a number')
         return {'model': model_name, 'base_url': url, 'api_key': key,
-                'context_window': context_window, 'extra_body': extra_body}
+                'context_window': context_window, 'extra_body': extra_body,
+                'temperature': temperature}
 
     coding_config = model_config('CODING', args.model)
     reasoning_config = model_config('REASONING')
@@ -263,8 +299,22 @@ Use --help-guide for setup, model configuration, safety, and all options.
             parser.error(str(exc))
 
     from crewai import Agent, Task, Crew, Process, LLM
+    from crewai.tools import tool as crew_tool
 
     from agent_tools import make_tools
+    from tool_probe import probe_tool_calling
+
+    model_settings = {'coding': coding_config, 'reasoning': reasoning_config}
+    probe_cache = {}
+
+    def probe(model_role):
+        """Probe a model once per endpoint; both roles often share one model."""
+        settings = model_settings[model_role]
+        key = (settings['model'], settings['base_url'])
+        if key not in probe_cache:
+            probe_cache[key] = probe_tool_calling(
+                llms[model_role], Agent=Agent, Task=Task, Crew=Crew, Process=Process, tool=crew_tool)
+        return probe_cache[key]
 
     def create_llm(settings):
         kwargs = {'model': settings['model'], 'api_key': settings['api_key']}
@@ -274,6 +324,8 @@ Use --help-guide for setup, model configuration, safety, and all options.
             kwargs['context_window_size'] = settings['context_window']
         if settings['extra_body'] is not None:
             kwargs['extra_body'] = settings['extra_body']
+        if settings['temperature'] is not None:
+            kwargs['temperature'] = settings['temperature']
         return LLM(**kwargs)
 
     llms = {'coding': create_llm(coding_config), 'reasoning': create_llm(reasoning_config)}
@@ -288,7 +340,12 @@ Use --help-guide for setup, model configuration, safety, and all options.
                 print(f'{label} model failed ({type(exc).__name__}): {exc}', file=sys.stderr)
         if failed:
             raise SystemExit(1)
-        print('Both models responded. This checks basic connectivity, not CrewAI tool calling.')
+        print('Both models responded. Checking CrewAI tool calling (one more small request per model)...')
+        for label in llms:
+            supported, detail = probe(label)
+            print(f'{label} model tool calling: {"works" if supported else "NOT usable"} ({detail}); '
+                  f'--tool-mode auto will use {"tools" if supported else "the tool-free text protocol"}.')
+        print('Edits work in either case; tool calling only decides how the agents reach the repository.')
         return
     tool_events = []
     def capture_tool_event(event):
@@ -328,6 +385,7 @@ Use --help-guide for setup, model configuration, safety, and all options.
         agent_defs = load_mapping(agents_path, 'agents')
         task_defs = load_mapping(tasks_path, 'tasks')
         agents = {}
+        text_agents = {}
         for name, spec in agent_defs.items():
             if not isinstance(spec, dict):
                 raise ValueError(f'Agent {name} must be a mapping')
@@ -340,16 +398,25 @@ Use --help-guide for setup, model configuration, safety, and all options.
             model_role = spec.get('model', 'coding')
             if model_role not in llms:
                 raise ValueError(f'Agent {name}: model must be coding or reasoning')
-            agents[name] = Agent(
-                role=render(spec['role']),
-                goal=render(spec['goal']),
-                backstory=render(spec['backstory']),
-                tools=[tool_lookup[t] for t in selected],
-                llm=llms[model_role],
-                verbose=bool(spec.get('verbose', True)),
-                allow_delegation=False,
-                max_iter=int(spec.get('max_iter', 20)),
-            )
+            def build(with_tools, spec=spec, selected=selected, model_role=model_role):
+                options = {}
+                if 'use_system_prompt' in spec:
+                    # Some models reject the system role; let the YAML turn it off.
+                    options['use_system_prompt'] = bool(spec['use_system_prompt'])
+                return Agent(
+                    role=render(spec['role']),
+                    goal=render(spec['goal']),
+                    backstory=render(spec['backstory']) + ('' if with_tools else TEXT_MODE_NOTE),
+                    tools=[tool_lookup[t] for t in selected] if with_tools else [],
+                    llm=llms[model_role],
+                    verbose=bool(spec.get('verbose', True)),
+                    allow_delegation=False,
+                    max_iter=int(spec.get('max_iter', 20)),
+                    **options,
+                )
+            agents[name] = build(True)
+            # Same agent without tools: used when a model cannot call them reliably.
+            text_agents[name] = build(False)
         tasks = []
         for name, spec in task_defs.items():
             if not isinstance(spec, dict) or spec.get('agent') not in agents:
@@ -382,6 +449,25 @@ Use --help-guide for setup, model configuration, safety, and all options.
 
     execution_status = {}
 
+    def resolve_tool_modes():
+        """Decide per agent whether tool calls can be relied on for this run."""
+        modes = {}
+        for name in ('planner', 'developer'):
+            spec = agent_defs.get(name)
+            if not isinstance(spec, dict):
+                continue
+            if args.tool_mode != 'auto':
+                modes[name] = args.tool_mode
+                print(f'TOOL MODE {name}: {modes[name]} (--tool-mode {args.tool_mode})')
+            elif not spec.get('tools'):
+                modes[name] = 'text'
+                print(f'TOOL MODE {name}: text (no tools configured)')
+            else:
+                supported, detail = probe(spec.get('model', 'coding'))
+                modes[name] = 'tools' if supported else 'text'
+                print(f'TOOL MODE {name}: {modes[name]} (probe: {detail})')
+        return modes
+
     def execute():
         print(f'Project: {cfg.root}\nBackups: {cfg.backup_root}\nCoding model: {coding_config["model"]}\nReasoning model: {reasoning_config["model"]}\nPytest enabled: {args.allow_tests}\n')
         if args.legacy_monolithic:
@@ -396,6 +482,8 @@ Use --help-guide for setup, model configuration, safety, and all options.
                 render=render, tool_lookup=tool_lookup, max_files=args.max_edit_files,
                 allow_tests=args.allow_tests, edits_in_run=edits_in_run,
                 Crew=Crew, Task=Task, Process=Process,
+                text_agents=text_agents, tool_modes=resolve_tool_modes(),
+                max_inline_chars=args.max_inline_chars, extra_attempts=args.edit_retries,
             )
             execution_status.update(status)
             verified_edits[0] = len(edits_in_run())
@@ -418,6 +506,7 @@ Use --help-guide for setup, model configuration, safety, and all options.
             'Coding model': coding_config['model'],
             'Reasoning model': reasoning_config['model'],
             'Pytest enabled': args.allow_tests,
+            'Tool mode': args.tool_mode,
             'Agents config': agents_path,
             'Tasks config': tasks_path,
             '_task_names': list(task_defs) if args.legacy_monolithic else [],

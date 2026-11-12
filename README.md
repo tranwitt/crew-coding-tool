@@ -1,16 +1,43 @@
-## Execution architecture (CrewAI primary)
+## Model-independent editing
 
-The default run calls `Crew(agents=..., tasks=..., process=Process.sequential).kickoff()` using the configured YAML agents and tasks. CrewAI owns the planning, development, and explanation workflow and agents have the repository tools. The deterministic JSON patch executor is **only a fallback** when CrewAI records zero edits. It does not run first.
+Edits no longer depend on the model being able to call tools. Every model call
+still goes through `Crew.kickoff()`, but the host application does the parts
+that weaker models get wrong:
 
-To run only CrewAI, use `--no-deterministic-fallback`. To retry the CrewAI developer before fallback, use `--edit-retries 1` (default 0 to avoid repeating an expensive failed pass).
+- **Context without tool calls.** The host lists the editable Python files (with
+  their top-level definitions) for the planner and embeds the current content of
+  the file being edited in each developer task.
+- **Edits as plain text.** The developer answers with SEARCH/REPLACE blocks. A JSON
+  `patches` object or, for a short file, the complete file in one code block are
+  also accepted, with prose around them ignored. `edit_protocol.py` locates each
+  edit in the current file (tolerating trailing whitespace, line endings and a
+  uniform indentation shift, but never an ambiguous match) and applies it through
+  the same `patch_project_file` tool, so path rules, syntax checks, backups and
+  the undo journal are unchanged.
+- **Tools only where they work.** `--tool-mode auto` (default) runs one small
+  CrewAI task per model to see whether it really invokes a tool. Models that do
+  keep their tools; models that do not get tool-free agents. An attempt that
+  fails with tools is repeated without them.
+- **Specific retries.** A rejected answer is retried with the exact validation
+  error and the current file. Edits already applied are recognised and skipped.
 
-Example:
+| Option | Behaviour |
+| --- | --- |
+| `--tool-mode auto` | Probe each model once; use tools only if they work (default) |
+| `--tool-mode text` | Never rely on tool calls; works with any chat model, no probe request |
+| `--tool-mode tools` | Skip the probe; offer tools first, fall back to text per file |
+| `--max-inline-chars N` | Largest file embedded in an edit task (default 60000); lower it for small context windows |
+| `--edit-retries N` | Extra tool-free attempts per file after the built-in two |
 
-```bash
-python main.py --repo /home/lonely_driver/working/esam-main --message "Add .doc ingestion" --no-deterministic-fallback
-```
+`python main.py --check-models` now also reports whether each model can call
+CrewAI tools. `--legacy-monolithic` keeps the old single-crew run, which still
+requires tool calling.
 
-This is a rollback of the direct-editor architecture, not a claim that all models reliably invoke CrewAI tools.
+Limits: only existing `.py` files are edited; a file larger than
+`--max-inline-chars` can only be edited by a model with working tools; and a
+journaled edit proves that a change was written, not that it is correct.
+
+Run the tests (no model or CrewAI installation needed) with `python -m pytest tests`.
 
 ---
 
@@ -41,7 +68,7 @@ CODING_LLM_API_KEY=your-coding-key
 CODING_LLM_MODEL=openai/gpt-4o
 ```
 
-The reasoning model runs the read-only **planner** and **explainer** agents. The coding model runs the **developer** agent, which can edit files and run tests. Each model can use a different provider, endpoint, key, or model identifier. The older `LLM_*` variables are accepted as fallbacks. `--model` overrides only the coding model. Both models must support the tool calls required by their agents.
+The reasoning model runs the read-only **planner** and **explainer** agents. The coding model runs the **developer** agent, which can edit files and run tests. Each model can use a different provider, endpoint, key, or model identifier. The older `LLM_*` variables are accepted as fallbacks. `--model` overrides only the coding model. Neither model needs to support tool calls.
 
 ## CLI help and explanations
 
@@ -71,9 +98,9 @@ python main.py --repo "$HOME/projects/sample-python-project" --allow-tests --mes
 - `config/agents.yaml`: roles, goals, backstories, tool permissions, and iteration limits.
 - `config/tasks.yaml`: task descriptions, assigned agent names, and expected outputs. Tasks execute in YAML order; previous task context is passed to later tasks by default.
 - Task descriptions support `{repo}`, `{request}`, and `{test_instruction}` placeholders.
-- Available tool names: `list_python_files`, `read_python_file`, `preview_python_patch`, `patch_python_file`, `run_pytest`.
+- Available tool names: `list_project_files`, `read_project_file`, `preview_project_patch`, `patch_project_file`, `run_pytest`.
 
-You can add another agent to `agents.yaml` and assign tasks to it in `tasks.yaml`. Only the developer agent should have `patch_python_file` if you want read-only analysis/review agents. `run_pytest` requires `--allow-tests`.
+You can add another agent to `agents.yaml` and assign tasks to it in `tasks.yaml`. Only the developer agent should have `patch_project_file` if you want read-only analysis/review agents. `run_pytest` requires `--allow-tests`.
 
 To use other YAML files:
 
@@ -152,6 +179,9 @@ Optional settings:
 
 - `REASONING_LLM_CONTEXT_WINDOW` and `CODING_LLM_CONTEXT_WINDOW`: positive
   integer context capacities, passed to CrewAI's `context_window_size`.
+- `REASONING_LLM_TEMPERATURE` and `CODING_LLM_TEMPERATURE`: optional sampling
+  temperature. A low value (for example `0.1`) helps models copy code exactly.
+  Leave unset for models that reject the parameter.
 - `REASONING_LLM_EXTRA_BODY` and `CODING_LLM_EXTRA_BODY`: JSON objects forwarded
   as provider-specific `extra_body`. Only use parameters supported by your
   deployed model and endpoint. Do not use this to set token limits.
@@ -164,10 +194,10 @@ python main.py --check-models
 
 This makes one small live inference request per configured model (which may
 incur provider charges). It checks authentication, endpoint, model ID, and
-basic response compatibility, **not tool calling**. CrewAI's coding tools
-require reliable tool calling; confirm that capability with a small trusted
-coding task before relying on automated edits. API/provider failures are
-reported with the failing model role and exception.
+basic response compatibility, then runs one tiny CrewAI task per model to see
+whether it can call tools. Editing works either way (see "Model-independent
+editing"). API/provider failures are reported with the failing model role and
+exception.
 
 No custom total-token or output-token budget is enforced.
 
@@ -227,3 +257,8 @@ edit) from `complete` (verified without a remaining patch error). This is struct
 validation, **not** proof that the requested feature works; enable `--allow-tests`
 for available repository tests and validate `.doc` behavior with a real legacy
 binary Word fixture.
+
+The sections "Nemotron / tool-call reliability", "Focused CrewAI execution" and
+"Strict focused-edit validation and retry" above describe the earlier
+tool-or-strict-JSON behaviour; where they differ, "Model-independent editing" at
+the top of this file is current.

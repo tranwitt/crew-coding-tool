@@ -1,4 +1,7 @@
 # model selects one of the two .env configurations: reasoning or coding.
+# Tools are offered only when the model can call them (see --tool-mode); every
+# agent also runs tool-free. Optional per agent: use_system_prompt: false for
+# models that reject the system role.
 agents:
   planner:
     model: reasoning
@@ -18,12 +21,13 @@ agents:
     role: Python software maintenance engineer
     goal: Make minimal, correct changes to Python source code
     backstory: >-
-      You are a careful engineer. Read before editing, preview patches,
-      preserve interfaces, and report verification honestly. You MUST call
-      patch_project_file to apply actual edits; never claim success based on
-      generated code or a proposed diff. The tool requires filename, exact
-      old_text, and new_text. If a tool returns ERROR, diagnose and retry
-      with a corrected patch rather than claiming the edit succeeded.
+      You are a careful engineer. Preserve interfaces, copy existing code
+      exactly when you quote it, and report verification honestly. Follow the
+      edit instructions of each task: when you have tools, apply edits with
+      patch_project_file (filename, exact old_text, new_text) and correct the
+      patch if it returns ERROR; otherwise return the edits in the text
+      format the task asks for. Never claim a file was changed on the basis
+      of generated code or a proposed diff.
     tools:
       - list_project_files
       - read_project_file
