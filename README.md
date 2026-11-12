@@ -1,51 +1,11 @@
-## Model-independent editing
-
-Edits no longer depend on the model being able to call tools. Every model call
-still goes through `Crew.kickoff()`, but the host application does the parts
-that weaker models get wrong:
-
-- **Context without tool calls.** The host lists the editable Python files (with
-  their top-level definitions) for the planner and embeds the current content of
-  the file being edited in each developer task.
-- **Edits as plain text.** The developer answers with SEARCH/REPLACE blocks. A JSON
-  `patches` object or, for a short file, the complete file in one code block are
-  also accepted, with prose around them ignored. `edit_protocol.py` locates each
-  edit in the current file (tolerating trailing whitespace, line endings and a
-  uniform indentation shift, but never an ambiguous match) and applies it through
-  the same `patch_project_file` tool, so path rules, syntax checks, backups and
-  the undo journal are unchanged.
-- **Tools only where they work.** `--tool-mode auto` (default) runs one small
-  CrewAI task per model to see whether it really invokes a tool. Models that do
-  keep their tools; models that do not get tool-free agents. An attempt that
-  fails with tools is repeated without them.
-- **Specific retries.** A rejected answer is retried with the exact validation
-  error and the current file. Edits already applied are recognised and skipped.
-
-| Option | Behaviour |
-| --- | --- |
-| `--tool-mode auto` | Probe each model once; use tools only if they work (default) |
-| `--tool-mode text` | Never rely on tool calls; works with any chat model, no probe request |
-| `--tool-mode tools` | Skip the probe; offer tools first, fall back to text per file |
-| `--max-inline-chars N` | Largest file embedded in an edit task (default 60000); lower it for small context windows |
-| `--edit-retries N` | Extra tool-free attempts per file after the built-in two |
-
-`python main.py --check-models` now also reports whether each model can call
-CrewAI tools. `--legacy-monolithic` keeps the old single-crew run, which still
-requires tool calling.
-
-Limits: only existing `.py` files are edited; a file larger than
-`--max-inline-chars` can only be edited by a model with working tools; and a
-journaled edit proves that a change was written, not that it is correct.
-
-Run the tests (no model or CrewAI installation needed) with `python -m pytest tests`.
-
----
-
 # Standalone CrewAI Python Code Agent
 
-Edit an existing local Python project using CrewAI. No Git required. The agent saves a backup before each edit and supports safe local undo and plain-text .log files for each run. Agents and tasks are defined in YAML. A read-only reasoning planner prepares a change plan, the coding agent edits files, and a read-only reasoning explainer summarizes the results.
+Point a CrewAI crew at a local Python project and give it a request. The crew
+analyses the code and either edits it or answers a question about it. No Git is
+required: every edit is backed up, journaled and undoable, and every run writes a
+plain-text log.
 
-## Linux setup
+## Setup (Linux)
 
 Use Python 3.12:
 
@@ -56,7 +16,7 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` to set two independent configurations:
+Edit `.env` to configure two independent models:
 
 ```dotenv
 REASONING_LLM_BASE_URL=https://api.openai.com/v1
@@ -68,197 +28,159 @@ CODING_LLM_API_KEY=your-coding-key
 CODING_LLM_MODEL=openai/gpt-4o
 ```
 
-The reasoning model runs the read-only **planner** and **explainer** agents. The coding model runs the **developer** agent, which can edit files and run tests. Each model can use a different provider, endpoint, key, or model identifier. The older `LLM_*` variables are accepted as fallbacks. `--model` overrides only the coding model. Neither model needs to support tool calls.
+The reasoning model runs the **planner** and **explainer** agents; the coding
+model runs the **developer** agent. Each can use a different provider, endpoint,
+key or model identifier. The older `LLM_*` variables are accepted as fallbacks,
+and `--model` overrides the coding model only. Neither model needs to support
+tool calls.
 
-## CLI help and explanations
+Optional per model (`REASONING_` or `CODING_` prefix):
 
-Show a quick description of every option, with examples:
+- `*_LLM_CONTEXT_WINDOW`: positive integer, passed to CrewAI's `context_window_size`.
+- `*_LLM_EXTRA_BODY`: JSON object forwarded as provider-specific `extra_body`.
+- `*_LLM_TEMPERATURE`: sampling temperature. A low value (for example `0.1`)
+  helps models copy code exactly. Leave unset for models that reject it.
 
-```bash
-python main.py --help
-```
+No token or output limit is imposed by this tool.
 
-Show the extended guide (no `--repo` or API keys needed):
+## Run types
 
-```bash
-python main.py --help-guide
-```
+There is one pipeline with two run types.
 
-The detailed guide explains setup, separate reasoning/coding model variables, the agent workflow, logs, backups, undo, tests, and command examples.
-
-## Run
-
-```bash
-python main.py --repo "$HOME/projects/sample-python-project" --message "Explain the code structure; do not edit files"
-python main.py --repo "$HOME/projects/sample-python-project" --allow-tests --message "Improve error handling and run pytest"
-```
-
-## Configure agents and tasks
-
-- `config/agents.yaml`: roles, goals, backstories, tool permissions, and iteration limits.
-- `config/tasks.yaml`: task descriptions, assigned agent names, and expected outputs. Tasks execute in YAML order; previous task context is passed to later tasks by default.
-- Task descriptions support `{repo}`, `{request}`, and `{test_instruction}` placeholders.
-- Available tool names: `list_project_files`, `read_project_file`, `preview_project_patch`, `patch_project_file`, `run_pytest`.
-
-You can add another agent to `agents.yaml` and assign tasks to it in `tasks.yaml`. Only the developer agent should have `patch_project_file` if you want read-only analysis/review agents. `run_pytest` requires `--allow-tests`.
-
-To use other YAML files:
+**Edit run** (default): select files → edit each file → run tests → explain.
 
 ```bash
-python main.py --repo "$HOME/projects/sample-python-project" --agents-config /path/agents.yaml --tasks-config /path/tasks.yaml --message "Fix a bug"
+python main.py --repo "$HOME/projects/sample" --allow-tests --message "Improve error handling in the loader"
 ```
 
-## Explanation of completed tasks
-
-After the planner and developer finish, the `explainer` agent runs a separate `explain` task (both configured in YAML). It describes the request, confirmed code changes, rationale, test results, and any unfinished work. Its explanation appears in the terminal and in both plain-text .log files under EXPLANATION OF WORK COMPLETED. The report is based on the developer's task output, so review the actual files for critical changes. The explainer has read-only tools and cannot modify code.
-
-You can customize its instructions in `config/tasks.yaml` or its role in `config/agents.yaml`.
-
-## Logs and backups
-
-The standalone agent includes a dedicated `logs/` directory. Each run writes one plain-text `logs/run-<timestamp>.log` containing the request, configuration, console transcript, task results, explanation, token usage, and undo command. View the newest logs with:
+**Analysis run** (`--analyze`): select files → answer the request. It never
+writes to the repository; the patch tool is withheld from every agent.
 
 ```bash
-ls -lt logs/
-less "$(ls -t logs/run-*.log | head -n 1)"
+python main.py --repo "$HOME/projects/sample" --analyze --message "Explain how configuration is loaded"
 ```
 
-To use another directory, pass `--log-dir /path/to/logs`.
+| Exit code | Edit run | Analysis run |
+| --- | --- | --- |
+| 0 | at least one edit was written and journaled | a report was produced |
+| 1 | the run crashed | no report was produced, or the run crashed |
+| 2 | nothing was changed | (not used) |
 
-Backups: **`backups/` inside this standalone agent directory** by default (or `--backup-dir` to override). Both logs and backups remain outside the target sample-python-project project. File tools only edit existing `.py` files and reject symlink escapes and protected directories. Running tests executes project code: use `--allow-tests` only for trusted projects or a sandbox. Do not share `.env` or unreviewed logs containing private source or secrets.
+The stages:
 
-## Undo changes (no Git or API key needed)
+1. **Select files.** The host lists the Python files with their top-level
+   definitions and the planner names the relevant ones. If it names no existing
+   file, paths written in the request are used, then a keyword match on file and
+   symbol names. Paths are never invented.
+2. **Edit** (edit runs). One developer task per file, with the current file
+   content and the plan in the task. Up to `--max-edit-files` files (default 6).
+3. **Verify** (edit runs). A change counts only when it is in the undo journal.
+   With `--allow-tests`, pytest runs after the edits.
+4. **Explain / analyse.** The explainer describes an edit run from the
+   host-computed diff, per-file outcome and test result, or answers an analysis
+   request from the selected files. `--no-explain` skips this stage for edit runs.
 
-Every successful agent patch is recorded in an undo journal inside the standalone `backups/` directory. To undo the most recent run's edits:
+## Model-independent editing
 
-```bash
-python main.py --repo "$HOME/projects/sample-python-project" --undo
-```
+Every model call goes through `Crew.kickoff()`, but nothing depends on the model
+calling tools:
 
-See run IDs and undo a specific latest outstanding run:
+- **Context without tool calls.** File listings and file contents are embedded in
+  the task by the host.
+- **Edits as plain text.** The developer answers with SEARCH/REPLACE blocks. A
+  JSON `patches` object or, for a short file, the complete file in one code block
+  are also accepted; surrounding prose is ignored. Each edit is located in the
+  current file (tolerating trailing whitespace, line endings and a uniform
+  indentation shift, but never an ambiguous match) and applied through
+  `patch_project_file`.
+- **Tools only where they work.** `--tool-mode auto` (default) runs one small
+  CrewAI task per model to see whether it really invokes a tool. `text` never
+  relies on tool calls and skips the probe; `tools` skips the probe and offers
+  tools first. A stage that fails with tools is repeated without them.
+- **Specific retries.** A rejected answer is retried with the exact validation
+  error and the current file; edits already applied are recognised and skipped.
+  `--edit-retries N` adds attempts per file.
 
-```bash
-python main.py --repo "$HOME/projects/sample-python-project" --list-runs
-python main.py --repo "$HOME/projects/sample-python-project" --undo RUN_ID
-```
+`--max-inline-chars N` (default 60000) is the largest file embedded in a task;
+lower it for small context windows. A larger file can only be edited by a model
+with working tools.
 
-Undo restores all patched Python files from the selected run in reverse edit order. It **refuses** to overwrite a file changed after the agent edited it (checksum conflict), refuses to undo an older run while newer outstanding edits exist, and refuses altered backups. It does not reverse arbitrary side effects from pytest or external commands. Only edits made by this version are journaled; earlier backups cannot be automatically undone through `--undo`. If you used a custom `--backup-dir` for the run, pass the same directory when undoing.
-
-
-The execution transcript is captured as preformatted text so CrewAI's verbose
-output, indentation, and code snippets are preserved. Separate sections contain
-uses only the Python standard library and escapes agent/tool output for safety.
-
-### Undo command displayed after each run
-
-After a coding run, the terminal prints the exact command for undoing **that run**,
-including its run ID and repository path. The command is also included in the
-plain-text .log files under UNDO THIS RUN. When no edits were recorded,
-the output states that there is nothing to undo. A custom `--backup-dir` is
-included in the command when supplied.
-
-### Token usage
-
-No maximum token count is imposed by this agent, either per request or per run.
-CrewAI provider-reported token usage is displayed when available.
-
-
-
-## Python-only scope
-
-
-## NVIDIA Nemotron / OpenAI-compatible models
-
-Configure each model separately in `.env` using `REASONING_LLM_*` and
-`CODING_LLM_*`. Set `*_LLM_BASE_URL` to the actual NVIDIA-compatible endpoint,
-`*_LLM_MODEL` to the model identifier accepted by CrewAI/LiteLLM for that
-endpoint, and `*_LLM_API_KEY` to your key. Model identifiers and context sizes
-vary by deployment; do not assume an example model's window applies to yours.
-
-Optional settings:
-
-- `REASONING_LLM_CONTEXT_WINDOW` and `CODING_LLM_CONTEXT_WINDOW`: positive
-  integer context capacities, passed to CrewAI's `context_window_size`.
-- `REASONING_LLM_TEMPERATURE` and `CODING_LLM_TEMPERATURE`: optional sampling
-  temperature. A low value (for example `0.1`) helps models copy code exactly.
-  Leave unset for models that reject the parameter.
-- `REASONING_LLM_EXTRA_BODY` and `CODING_LLM_EXTRA_BODY`: JSON objects forwarded
-  as provider-specific `extra_body`. Only use parameters supported by your
-  deployed model and endpoint. Do not use this to set token limits.
-
-Test basic connectivity without editing a repository:
+Check both models, including tool calling, without touching a repository (this
+makes a few small paid requests):
 
 ```bash
 python main.py --check-models
 ```
 
-This makes one small live inference request per configured model (which may
-incur provider charges). It checks authentication, endpoint, model ID, and
-basic response compatibility, then runs one tiny CrewAI task per model to see
-whether it can call tools. Editing works either way (see "Model-independent
-editing"). API/provider failures are reported with the failing model role and
-exception.
+## Configure agents
 
-No custom total-token or output-token budget is enforced.
+`config/agents.yaml` defines `planner`, `developer` and `explainer`: role, goal,
+backstory, model (`reasoning` or `coding`), tools and `max_iter`. Use another
+file with `--agents-config`. `{repo}` and `{request}` are replaced in agent text.
 
-## Nemotron / tool-call reliability
+- Tool names: `list_project_files`, `read_project_file`, `preview_project_patch`,
+  `patch_project_file`, `run_pytest` (the last needs `--allow-tests`).
+- `use_system_prompt: false` is available for models that reject the system role.
 
-The developer is instructed to invoke `patch_project_file` with an exact source
-fragment and replacement, not just describe a patch. The file tool emits
-`FILE_TOOL_EVENT` entries to the console and the timestamped `.log`, recording
-attempts, errors and successful writes without logging full source fragments.
-After the normal crew completes, the agent checks its backup/undo journal for
-actual writes. If there were none, it runs a **developer-only retry** once by
-default (`--edit-retries 0` to disable, up to 5). If no edits are recorded
-after retry, the command exits with status **2** rather than claiming success.
-This applies to coding requests; read-only/explanation requests with no edits
-will also exit 2, so set `--edit-retries 0` for those requests.
+The task prompts of each stage live in `pipeline.py`.
 
-The retry is another model call and may incur API charges. It cannot overcome
-unsupported tool schemas, access restrictions, or API failures. The journal
-verifies that writes occurred, not that the requested behavior is correct.
-Only `.py` files are editable; path restrictions, backups, undo, and plain
-`.log` output are preserved.
+## Scope and safety
 
-## Focused CrewAI execution (default)
+- Only existing `.py` files are read or edited; the crew cannot create files.
+- `--allowed-paths` limits editing to the listed files or directories;
+  `--read-only-paths` can be read but never edited.
+- Symlink escapes, protected directories, secrets files and binary files are
+  rejected. Every patch is syntax-checked before it is written.
+- Running tests executes project code: use `--allow-tests` only for trusted
+  projects or in a sandbox.
+- A journaled edit proves that a change was written, not that it is correct.
+  Review the diff and run your tests.
 
-The default execution path runs a read-only planning task through `Crew.kickoff()`,
-then runs **one focused CrewAI coding task per selected Python file** (up to six by
-default). The developer can call `patch_project_file` directly. If a CrewAI task
-instead returns a valid JSON `patches` object, Python validates and applies its
-exact-text patches through the **same** safe, journaled tool. No standalone LLM
-calls or deterministic-model fallback are used by this workflow.
+## Logs and backups
 
-After every coding task the undo journal determines whether a real edit occurred.
-The final log records completed/incomplete files and test results. With
-`--allow-tests`, pytest runs after the editing tasks. `--max-edit-files 4`
-reduces the file limit; `--legacy-monolithic` restores the old single-crew
-planner/developer/explainer sequence. `--no-deterministic-fallback` is accepted
-for backwards CLI compatibility; the focused workflow never uses that fallback.
+Each run writes `logs/run-<timestamp>.log` with the request, configuration,
+console transcript, the explanation or analysis report, token usage as reported
+by the provider, the verified status and the undo command. Use `--log-dir` for
+another directory.
 
-The planner must explicitly identify relevant existing `.py` paths; a missing
-file list causes the run to stop without inventing targets. Model responses
-remain fallible; verify resulting edits and tests before deployment.
+Backups and undo journals go to `backups/` beside this tool (or `--backup-dir`).
+Both directories stay outside the target project and may contain private source
+code; do not share them or `.env` unreviewed.
 
-### Strict focused-edit validation and retry
+## Undo
 
-The default focused workflow requires the developer to either invoke the patch tool
-successfully or return a **single JSON object** with a nonempty `patches` array.
-Every patch must contain exactly `filename`, `old_text`, and `new_text`, target the
-current selected file, and provide a unique nonempty source fragment. Narrative
-success claims, empty arrays, wrong paths, and no-op replacements are rejected.
+```bash
+python main.py --repo "$HOME/projects/sample" --undo            # latest run
+python main.py --repo "$HOME/projects/sample" --list-runs
+python main.py --repo "$HOME/projects/sample" --undo RUN_ID
+```
 
-If an attempt yields no journaled edit, CrewAI runs **one** targeted retry with the
-specific validation error. A patch executor response is not considered success
-unless a journal entry appears. Partial patch applications are flagged as incomplete
-and are not retried automatically; inspect the journal and use the existing undo
-command if necessary. The final report separates `verified` (at least one journaled
-edit) from `complete` (verified without a remaining patch error). This is structural
-validation, **not** proof that the requested feature works; enable `--allow-tests`
-for available repository tests and validate `.doc` behavior with a real legacy
-binary Word fixture.
+Undo restores every file a run patched. It refuses to overwrite a file changed
+since the run, to undo an older run while a newer one is outstanding, and to use
+an altered backup. It does not reverse side effects of pytest. If the run used
+`--backup-dir`, pass the same directory when undoing; the exact command is
+printed after each edit run.
 
-The sections "Nemotron / tool-call reliability", "Focused CrewAI execution" and
-"Strict focused-edit validation and retry" above describe the earlier
-tool-or-strict-JSON behaviour; where they differ, "Model-independent editing" at
-the top of this file is current.
+## Code layout
+
+| File | Purpose |
+| --- | --- |
+| `main.py` | Command line, run setup, final report and exit code |
+| `pipeline.py` | The stages and the two run types |
+| `edit_protocol.py` | Parse text answers into exact, unambiguous edits |
+| `repo_context.py` | File listing, file selection, run diffs |
+| `crew_setup.py` | Build agents from YAML; decide tool modes |
+| `tool_probe.py` | Check whether a model really calls CrewAI tools |
+| `models.py` | Model settings from `.env`; `--check-models` |
+| `agent_tools.py` | Read, preview, patch and pytest tools |
+| `config.py` | Path rules for the target repository |
+| `undo.py` | Edit journal and undo |
+| `run_log.py` | Console capture and log files |
+
+Run the tests (no model or CrewAI installation needed):
+
+```bash
+python -m pytest tests
+```
+
+Use `python main.py --help` for all options and `--help-guide` for a longer guide.
