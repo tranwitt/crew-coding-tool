@@ -69,7 +69,7 @@ class Config:
         binary_ext = {'.png','.jpg','.jpeg','.gif','.webp','.pdf','.zip','.gz','.tar','.7z','.exe','.dll','.so','.dylib','.class','.pyc','.woff','.woff2','.ttf','.mp3','.mp4','.sqlite','.db','.pem','.key','.p12','.pfx','.lock'}
         if target.name.lower() in forbidden or target.name.lower().startswith('.env.') or target.suffix.lower() in binary_ext:
             raise ValueError('Protected or binary file')
-        if target.is_file() and b'\\x00' in target.read_bytes()[:8192]:
+        if target.is_file() and b'\x00' in target.read_bytes()[:8192]:
             raise ValueError('Binary file not supported')
         if target.suffix.lower() != '.py':
             raise ValueError('Only Python .py files are supported')

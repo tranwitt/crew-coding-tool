@@ -34,7 +34,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
                     relative = (Path(directory) / name).relative_to(cfg.root)
                     try:
                         cfg.file(str(relative))
-                        files.append(str(relative))
+                        files.append(relative.as_posix())
                     except (ValueError, FileNotFoundError):
                         pass
             if len(files) >= 1000:
@@ -67,6 +67,10 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
             if len(original_bytes) > 300_000:
                 return 'ERROR: File too large'
             original = original_bytes.decode('utf-8')
+            # Match what read_project_file showed the model (\n), then restore CRLF on write.
+            crlf = '\r\n' in original
+            if crlf:
+                original = original.replace('\r\n', '\n')
             count = original.count(old_text)
             if count != 1:
                 return f'ERROR: Expected exactly one match; found {count}'
@@ -76,6 +80,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
                 return 'ERROR: Patch would not change the file'
             if path.suffix.lower() == ".py":
                 ast.parse(revised, filename=str(path))
+            on_disk = (revised.replace('\n', '\r\n') if crlf else revised).encode('utf-8')
             run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '-' + uuid4().hex[:8]
             backup = cfg.backup_root / run_id / path.relative_to(cfg.root)
             backup.parent.mkdir(parents=True, exist_ok=True)
@@ -84,7 +89,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
             fd, temp_name = tempfile.mkstemp(prefix='.agent-', suffix=path.suffix or '.txt', dir=path.parent)
             try:
                 with os.fdopen(fd, 'wb') as output:
-                    output.write(revised.encode('utf-8'))
+                    output.write(on_disk)
                     output.flush()
                     os.fsync(output.fileno())
                 shutil.copymode(path, temp_name)
@@ -93,7 +98,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
                 if os.path.exists(temp_name):
                     os.unlink(temp_name)
             try:
-                record_edit(cfg, filename, backup, original_bytes, revised.encode('utf-8'))
+                record_edit(cfg, filename, backup, original_bytes, on_disk)
             except Exception:
                 # Never leave an untracked edit when journaling fails.
                 os.replace(backup, path)

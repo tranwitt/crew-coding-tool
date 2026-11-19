@@ -77,6 +77,7 @@ def _selected_files(plan, cfg, limit):
     """Only accept explicit existing Python paths cited in the planner output."""
     matches = []
     seen = set()
+    plan = plan.replace('\\', '/')  # Windows planners echo tests\\x.py
     for match in re.finditer(r'(?<![\w/.-])(?:[\w.-]+/)*[\w.-]+\.py(?![\w/.-])', plan):
         name = match.group(0)
         if name in seen:
@@ -111,7 +112,7 @@ def run_focused_crew(*, cfg, request, agents, task_defs, render, tool_lookup,
     )
     print('CREWAI STAGE: planning via Crew.kickoff()', flush=True)
     plan_result = Crew(agents=[planner], tasks=[planning],
-                       process=Process.sequential, verbose=True).kickoff()
+                       process=Process.sequential, verbose=True, tracing=False).kickoff()
     plan = _raw(plan_result)
     selected = _selected_files(plan, cfg, max_files)
     print('CREWAI FILE TARGETS: ' + json.dumps(selected), flush=True)
@@ -153,7 +154,7 @@ def run_focused_crew(*, cfg, request, agents, task_defs, render, tool_lookup,
             )
             print(f'CREWAI STAGE: edit {filename} attempt {attempt + 1}/2 via Crew.kickoff()', flush=True)
             result = Crew(agents=[developer], tasks=[task],
-                          process=Process.sequential, verbose=True).kickoff()
+                          process=Process.sequential, verbose=True, tracing=False).kickoff()
             for k, v in _usage(result).items():
                 usage[k] = usage.get(k, 0) + v
             raw = _raw(result)
