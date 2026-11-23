@@ -15,6 +15,23 @@ from config import Config, EXCLUDED
 from undo import record_edit
 
 
+def _text_and_newline(raw: str) -> tuple[str, str]:
+    """A file's text with \n line endings, and the ending to write back.
+
+    read_project_file shows the model \n (text mode) while the edit stage shows
+    the raw text, so an old_text from either must match. Only a file whose every
+    line ends in \r\n is converted; a mixed file is matched as it is.
+    """
+    if '\r\n' in raw and raw.count('\r\n') == raw.count('\n'):
+        return raw.replace('\r\n', '\n'), '\r\n'
+    return raw, '\n'
+
+
+def _as(text: str, newline: str) -> str:
+    """Text from the model, with the line endings _text_and_newline chose."""
+    return text.replace('\r\n', '\n') if newline == '\r\n' else text
+
+
 def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
     def emit(action, **details):
         if on_event is not None:
@@ -64,7 +81,8 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
             original_bytes = path.read_bytes()
             if len(original_bytes) > 300_000:
                 return 'ERROR: File too large'
-            original = original_bytes.decode('utf-8')
+            original, newline = _text_and_newline(original_bytes.decode('utf-8'))
+            old_text, new_text = _as(old_text, newline), _as(new_text, newline)
             if not original.strip() and not old_text.strip():
                 # An empty file has nothing to match: the new text becomes its content.
                 revised = new_text
@@ -80,6 +98,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
                 return 'ERROR: Patch would not change the file'
             if path.suffix.lower() == ".py":
                 ast.parse(revised, filename=str(path))
+            on_disk = (revised.replace('\n', '\r\n') if newline == '\r\n' else revised).encode('utf-8')
             run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '-' + uuid4().hex[:8]
             backup = cfg.backup_root / run_id / path.relative_to(cfg.root)
             backup.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +107,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
             fd, temp_name = tempfile.mkstemp(prefix='.agent-', suffix=path.suffix or '.txt', dir=path.parent)
             try:
                 with os.fdopen(fd, 'wb') as output:
-                    output.write(revised.encode('utf-8'))
+                    output.write(on_disk)
                     output.flush()
                     os.fsync(output.fileno())
                 shutil.copymode(path, temp_name)
@@ -97,7 +116,7 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
                 if os.path.exists(temp_name):
                     os.unlink(temp_name)
             try:
-                record_edit(cfg, filename, backup, original_bytes, revised.encode('utf-8'))
+                record_edit(cfg, filename, backup, original_bytes, on_disk)
             except Exception:
                 # Never leave an untracked edit when journaling fails.
                 os.replace(backup, path)
@@ -162,7 +181,8 @@ def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):
         try:
             emit('preview_attempt', file=filename)
             path = cfg.file(filename, for_edit=True)
-            original = path.read_text(encoding='utf-8')
+            original, newline = _text_and_newline(path.read_bytes().decode('utf-8'))   # as patch_project_file sees it
+            old_text, new_text = _as(old_text, newline), _as(new_text, newline)
             if not original.strip() and not old_text.strip():
                 revised = new_text
             else:
