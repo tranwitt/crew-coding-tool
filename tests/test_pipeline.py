@@ -477,3 +477,25 @@ class RepairTests(PipelineCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CrlfFlowTests(FlowTests):
+    """Every flow test again, on files saved with Windows line endings.
+
+    On Windows, Path.write_text writes \r\n; the model must still be shown \n
+    text, its edits must apply, and the files must keep their line endings.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for path in (self.app, self.cfg.root / 'pkg' / 'util.py'):
+            path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
+
+    def test_an_edited_crlf_file_keeps_crlf(self):
+        def model(task):
+            return 'FILE: app.py' if task.agent.name == 'planner' else '```\n' + BLOCK + '```'
+
+        status, _ = self.run_flow(model, {'planner': 'text', 'developer': 'text'})
+        self.assertEqual(status['completed_files'], ['app.py'])
+        self.assertEqual(self.app.read_bytes(),
+                         APP.replace('"Hello " + name', '"Hello, " + name + "!"').replace('\n', '\r\n').encode())

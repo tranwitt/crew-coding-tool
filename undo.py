@@ -129,5 +129,5 @@ def undo_run(cfg, run_id: str = 'latest') -> dict:
     selected['undone_utc'] = datetime.now(timezone.utc).isoformat()
     atomic_write(journal_path(cfg, selected['run_id']), json.dumps(selected, indent=2).encode('utf-8'))
     return {'run_id': selected['run_id'],
-            'restored_files': [str(p.relative_to(cfg.root)) for p in virtual],
-            'removed_files': [str(p.relative_to(cfg.root)) for p, original in virtual.items() if original is None]}
+            'restored_files': [p.relative_to(cfg.root).as_posix() for p in virtual],
+            'removed_files': [p.relative_to(cfg.root).as_posix() for p, original in virtual.items() if original is None]}

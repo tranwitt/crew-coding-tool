@@ -12,24 +12,8 @@ from uuid import uuid4
 
 from crewai.tools import tool
 from config import Config, EXCLUDED
+from repo_context import as_newline as _as, text_and_newline as _text_and_newline
 from undo import record_edit
-
-
-def _text_and_newline(raw: str) -> tuple[str, str]:
-    """A file's text with \n line endings, and the ending to write back.
-
-    read_project_file shows the model \n (text mode) while the edit stage shows
-    the raw text, so an old_text from either must match. Only a file whose every
-    line ends in \r\n is converted; a mixed file is matched as it is.
-    """
-    if '\r\n' in raw and raw.count('\r\n') == raw.count('\n'):
-        return raw.replace('\r\n', '\n'), '\r\n'
-    return raw, '\n'
-
-
-def _as(text: str, newline: str) -> str:
-    """Text from the model, with the line endings _text_and_newline chose."""
-    return text.replace('\r\n', '\n') if newline == '\r\n' else text
 
 
 def make_tools(cfg: Config, *, allow_tests: bool = False, on_event=None):

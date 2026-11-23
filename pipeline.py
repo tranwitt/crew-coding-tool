@@ -17,7 +17,7 @@ import re
 from edit_protocol import (EditError, create_instructions, format_instructions, parse_edits,
                            parse_new_file, resolve_edit)
 from task_config import require_stages
-from repo_context import (describe_repository, files_matching_request, files_named_in,
+from repo_context import (source_text, describe_repository, files_matching_request, files_named_in,
                           list_python_files, new_files_named_in, run_diffs)
 
 PLAN_CONTEXT_CHARS = 4000
@@ -137,7 +137,7 @@ def _created_context(cfg, created):
     parts, budget = [], CREATED_CONTEXT_CHARS
     for filename in created:
         try:
-            text = cfg.file(filename).read_bytes().decode('utf-8')
+            text = source_text(cfg.file(filename))
         except (ValueError, OSError, UnicodeError):
             continue
         if len(text) > budget:
@@ -238,8 +238,8 @@ def edit_file(runner, tasks, cfg, request, filename, plan_context, created=(), *
     """
     stage = tasks['edit']
     def read_source():
-        # Bytes, not text mode: the patch tool matches against undecoded newlines.
-        return cfg.file(filename, for_edit=True).read_bytes().decode('utf-8')
+        # \n line endings on every platform; the patch tool converts back for CRLF files.
+        return source_text(cfg.file(filename, for_edit=True))
 
     file_start = len(edits_in_run())
     errors, attempts = [], []
@@ -471,7 +471,7 @@ def run_analysis_pipeline(*, cfg, request, runner, tasks, max_files, max_inline_
     shown, omitted, budget = [], [], max_inline_chars
     for filename in selected:
         try:
-            text = cfg.file(filename).read_bytes().decode('utf-8')
+            text = source_text(cfg.file(filename))
         except (ValueError, OSError, UnicodeError):
             omitted.append(filename)
             continue

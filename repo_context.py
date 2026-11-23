@@ -7,6 +7,32 @@ from pathlib import Path
 
 from config import EXCLUDED
 
+
+def text_and_newline(raw: str) -> tuple[str, str]:
+    """A file's text with \n line endings, and the ending to write back.
+
+    read_project_file shows the model \n (text mode) while the edit stage shows
+    the raw text, so an old_text from either must match. Only a file whose every
+    line ends in \r\n is converted; a mixed file is matched as it is.
+    """
+    if '\r\n' in raw and raw.count('\r\n') == raw.count('\n'):
+        return raw.replace('\r\n', '\n'), '\r\n'
+    return raw, '\n'
+
+
+def as_newline(text: str, newline: str) -> str:
+    """Text from the model, with the line endings text_and_newline chose."""
+    return text.replace('\r\n', '\n') if newline == '\r\n' else text
+
+
+def source_text(path) -> str:
+    """A file's text as the model is shown it: \n line endings, whatever the file uses.
+
+    patch_project_file accepts edits written against this text. Reading in text
+    mode would do the same on one platform only; this is the same everywhere.
+    """
+    return text_and_newline(Path(path).read_bytes().decode('utf-8'))[0]
+
 OUTLINE_CHARS = 12000
 LISTED_FILES = 400
 
@@ -152,8 +178,8 @@ def run_diffs(cfg, edits, budget=20000):
     parts = []
     for filename, backup in originals.items():
         try:
-            before = Path(backup).read_bytes().decode('utf-8') if backup else ''
-            after = cfg.file(filename).read_bytes().decode('utf-8')
+            before = source_text(backup) if backup else ''
+            after = source_text(cfg.file(filename))
         except (ValueError, OSError, UnicodeError) as exc:
             parts.append(f'{filename}: diff unavailable ({exc})\n')
             continue
